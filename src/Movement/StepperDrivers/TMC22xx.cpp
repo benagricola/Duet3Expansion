@@ -117,9 +117,10 @@ enum class DriversState : uint8_t
 };
 
 static DriversState driversState = DriversState::shutDown;
+#if HAS_STALL_DETECT
 static LocalDriversBitmap stallEndstopsEnabled;
 std::atomic<uint16_t> SmartDrivers::driverStallsToNotify(0);
-
+#endif
 #if TMC22xx_USE_SLAVEADDR && TMC22xx_HAS_MUX
 static bool currentMuxState;
 #endif
@@ -674,7 +675,7 @@ private:
 
 #if SUPPORT_TMC2240
 	static constexpr unsigned int NumWriteRegisters = 10;		// the number of registers that we write to on a TMC2240
-#elif HAS_STALL_DETECT
+#elif SUPPORT_TMC2209
 	static constexpr unsigned int NumWriteRegisters = 9;		// the number of registers that we write to on a TMC2209
 #else
 	static constexpr unsigned int NumWriteRegisters = 6;		// the number of registers that we write to on a TMC2208/2224
@@ -688,7 +689,7 @@ private:
 	static constexpr unsigned int WriteIholdIrun = 3;			// current setting
 	static constexpr unsigned int WritePwmConf = 4;				// read register select, sense voltage high/low sensitivity
 	static constexpr unsigned int WriteTpwmthrs = 5;			// upper step rate limit for stealthchop
-#if HAS_STALL_DETECT
+#if SUPPORT_TMC2209 || SUPPORT_TMC2240
 	static constexpr unsigned int WriteTcoolthrs = 6;			// coolstep and stall DIAG output lower speed threshold
 	static constexpr unsigned int WriteSgthrs = 7;				// stallguard threshold
 	static constexpr unsigned int WriteCoolconf = 8;			// coolstep configuration
@@ -700,7 +701,7 @@ private:
 
 #if SUPPORT_TMC2240
 	static constexpr unsigned int NumReadRegisters = 8;			// the number of registers that we read from on a TMC2240
-#elif HAS_STALL_DETECT
+#elif SUPPORT_TMC2209
 	static constexpr unsigned int NumReadRegisters = 7;			// the number of registers that we read from on a TMC2209
 #else
 	static constexpr unsigned int NumReadRegisters = 6;			// the number of registers that we read from on a TMC2208/2224
@@ -714,7 +715,7 @@ private:
 	static constexpr unsigned int ReadChopConf = 3;			// chopper control register - we read it to detect the VSENSE bit getting cleared
 	static constexpr unsigned int ReadPwmScale = 4;			// PWM scaling
 	static constexpr unsigned int ReadPwmAuto = 5;			// PWM scaling
-#if HAS_STALL_DETECT
+#if SUPPORT_TMC2209 || SUPPORT_TMC2240
 	static constexpr unsigned int ReadSgResult = 6;			// stallguard result
 #endif
 #if SUPPORT_TMC2240
@@ -915,6 +916,7 @@ inline uint8_t TmcDriverState::GetReadRegNumber(size_t regIndex) const noexcept
 // State structures for all drivers
 static TmcDriverState driverStates[MaxSmartDrivers];
 
+#if HAS_STALL_DETECT
 // ISR for Diag pins
 static void DiagPinInterruptEntry(CallbackParameter cp) noexcept
 {
@@ -927,6 +929,7 @@ static void DiagPinInterruptEntry(CallbackParameter cp) noexcept
 		CanInterface::WakeAsyncSender();
 	}
 }
+#endif
 
 inline bool TmcDriverState::UpdatePending() const noexcept
 {
@@ -1297,6 +1300,7 @@ void TmcDriverState::AppendStallConfig(const StringRef& reply) const noexcept
 				threshold, 12000000 / (256 * writeRegisters[WriteTcoolthrs]), writeRegisters[WriteCoolconf] & 0xFFFF);
 }
 
+#if HAS_STALL_DETECT
 // Check that stall detection can occur at the specified speed
 const char *_ecv_array _ecv_null  TmcDriverState::CheckStallDetectionEnabled(float speed) noexcept
 {
@@ -1314,6 +1318,7 @@ const char *_ecv_array _ecv_null  TmcDriverState::CheckStallDetectionEnabled(flo
 	}
 	return nullptr;
 }
+#endif
 
 void TmcDriverState::EnableDiagInterrupt() noexcept
 {
@@ -1392,7 +1397,7 @@ bool TmcDriverState::SetRegister(SmartDriverRegister reg, uint32_t regVal) noexc
 		UpdateRegister(WriteTpwmthrs, regVal & ((1u << 20) - 1));
 		return true;
 
-#if HAS_STALL_DETECT
+#if SUPPORT_TMC2209 || SUPPORT_TMC2240
 	case SmartDriverRegister::coolStep:
 		UpdateRegister(WriteCoolconf, regVal & ((1u << 16) - 1));
 		return true;
@@ -1426,9 +1431,6 @@ uint32_t TmcDriverState::GetRegister(SmartDriverRegister reg) const noexcept
 	case SmartDriverRegister::tpwmthrs:
 		return writeRegisters[WriteTpwmthrs] & 0x000FFFFF;
 
-	case SmartDriverRegister::tcoolthrs:
-		return writeRegisters[WriteTcoolthrs] & 0x000FFFFF;
-
 	case SmartDriverRegister::mstepPos:
 		return readRegisters[ReadMsCnt];
 
@@ -1438,7 +1440,10 @@ uint32_t TmcDriverState::GetRegister(SmartDriverRegister reg) const noexcept
 	case SmartDriverRegister::pwmAuto:
 		return readRegisters[ReadPwmAuto];
 
-#if HAS_STALL_DETECT
+#if SUPPORT_TMC2209 || SUPPORT_TMC2240
+	case SmartDriverRegister::tcoolthrs:
+		return writeRegisters[WriteTcoolthrs] & 0x000FFFFF;
+
 	case SmartDriverRegister::coolStep:
 		return writeRegisters[WriteCoolconf];
 #endif
@@ -2598,6 +2603,7 @@ StandardDriverStatus SmartDrivers::GetStatus(size_t driver, bool accumulated, bo
 	return rslt;
 }
 
+#if HAS_STALL_DETECT
 GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float speed, const StringRef& reply) noexcept
 {
 	if (driverNumber < GetNumTmcDrivers())
@@ -2622,6 +2628,7 @@ GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float 
 		return GCodeResult::ok;
 	}
 }
+#endif
 
 uint32_t SmartDrivers::GetDriverClockFrequency() noexcept
 {
