@@ -42,6 +42,7 @@ namespace TouchMode
 	static uint32_t lastReading;				// the previous reading
 	static uint32_t lastReadingTime;			// the previous reading time of the sensor, in step clocks
 	static uint16_t lastSpeed, lastSpeedMinus1, lastSpeedMinus2;
+	static uint32_t peakSpeedSum;
 	static unsigned int numBadReadings;
 	static AveragingFilter<16> speedFilter;
 
@@ -59,6 +60,7 @@ void TouchMode::Start(uint32_t sens) noexcept
 	numBadReadings = 0;
 	startTime = StepTimer::GetTimerTicks();
 	speedFilter.Init(0);
+	peakSpeedSum = 0;
 	enabled = true;
 }
 
@@ -80,12 +82,49 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 			{
 				inputMonitor->SetTriggered();
 			}
-//			debugPrintf("Bad reading %08" PRIx32 "\n", reading);
+			debugPrintf("Bad reading %08" PRIx32 "\n", reading);
 			Stop();
 		}
 	}
 	else
 	{
+#if 1
+		const uint32_t now = StepTimer::GetTimerTicks();
+		const uint32_t interval = now - lastReadingTime;
+
+		// We expect the speed to fit in 16 bits normally
+		const uint16_t currentSpeed = (uint16_t)constrain<int32_t>((((int32_t)reading - (int32_t)lastReading) * 256)/(int32_t)interval, 0, 65535);
+		const uint32_t prevSpeedSum = speedFilter.GetSum();
+		const uint32_t recentSpeed = (uint32_t)currentSpeed + lastSpeed + lastSpeedMinus1 + lastSpeedMinus2;
+		speedFilter.ProcessReading((unsigned int)(recentSpeed/4));
+
+		if (now - startTime >= StepTimer::StepClockRate/10)		// allow for the movement start delay and some more
+		{
+			// Average the most recent 4 readings
+			const uint32_t speedSum = speedFilter.GetSum();
+			if (speedSum >= prevSpeedSum)
+			{
+				peakSpeedSum = speedSum;
+			}
+			else
+			{
+				//debugPrintf("R %u I%u S %u/%u/%u\n", (unsigned int)reading, (unsigned int)interval, (unsigned int)(recentSpeed/4), (unsigned int)(speedSum/speedFilter.NumAveraged()), (unsigned int)(peakSpeedSum/speedFilter.NumAveraged()));
+				if ((speedSum * 65536) < peakSpeedSum * sensitivity)
+				{
+					inputMonitor->SetTriggered();
+					Stop();
+					//debugPrintf("Speed %u/%u/%u\n", (unsigned int)(recentSpeed/4), (unsigned int)(speedSum/speedFilter.NumAveraged()), (unsigned int)(peakSpeedSum/speedFilter.NumAveraged()));
+				}
+			}
+		}
+
+		lastSpeedMinus2 = lastSpeedMinus1;
+		lastSpeedMinus1 = lastSpeed;
+		lastSpeed = currentSpeed;
+		lastReading = reading;
+		lastReadingTime = now;
+		numBadReadings = 0;
+#else
 		const uint32_t now = StepTimer::GetTimerTicks();
 		const uint32_t interval = now - lastReadingTime;
 
@@ -113,6 +152,7 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 		lastReading = reading;
 		lastReadingTime = now;
 		numBadReadings = 0;
+#endif
 	}
 }
 
