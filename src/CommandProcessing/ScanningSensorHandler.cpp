@@ -36,6 +36,34 @@ static InputMonitor *inputMonitor = nullptr;		// when the sensor is active this 
 namespace TouchMode
 {
 //private:
+	static const size_t sosSections = 2;
+	static float sosState[sosSections][2];
+	static const float sosButterworthFilter500[sosSections][6] = 
+													{ {	0.013359200027856505,
+														0.02671840005571301,
+														0.013359200027856505,
+														1.0,
+														-1.686278256753083,
+														0.753714473246724
+													 },
+													 {	1.0,
+													 	-2.0,
+													 	1.0,
+														1.0,
+														-1.9250515947328444,
+														0.9299234737648037
+													 }
+													};
+													
+	//static constexpr float convertToFreq = ldexpf(LDC1612::FRef, -28);
+	static constexpr float convertToFreq = 20000000.0f / (float)(1<<28);
+	static float SosFilter(float value, const float filter[][6], float state[][2]) noexcept;
+	static float baseFreq;
+	static float lastValue;
+	static float startValue;
+	static bool falling;
+	static size_t goodCnt;
+	static float threshold;
 	static bool enabled = false;
 	static uint16_t sensitivity;
 	static uint32_t startTime;					// the time we started taking touch mode readings, in step clocks
@@ -62,12 +90,58 @@ void TouchMode::Start(uint32_t sens) noexcept
 	speedFilter.Init(0);
 	peakSpeedSum = 0;
 	enabled = true;
+	for(size_t i = 0; i < sosSections; i++)
+	{
+		sosState[i][0] = 0.0f;
+		sosState[i][1] = 0.0f;
+	}
+	baseFreq = 0.0f;
+	lastValue = 0.0f;
+	startValue = 0.0f;
+	falling = false;
+	threshold = 1000.0f*(1 - ((float)sensitivity/65536));
+	goodCnt = 0;
 }
 
 void TouchMode::Stop() noexcept
 {
 	enabled = false;
 }
+
+float TouchMode::SosFilter(float value, const float filter[][6], float state[][2]) noexcept
+{
+	for(size_t i = 0; i < sosSections; i++)
+	{
+		const float w1 = state[i][0];
+		const float w2 = state[i][1];
+		const float w0 = value - filter[i][4]*w1 - filter[i][5]*w2;
+		value = filter[i][0]*w0 + filter[i][1]*w1 + filter[i][2]*w2;
+		state[i][0] = w0;
+		state[i][1] = w1;
+	}
+	return value;
+#if 0
+    for (int k = 0; k < num_sections; k++) {
+        float w1 = state[2*k];
+        float w2 = state[2*k+1];
+        float b0 = *sos++; //sos[6*k];
+        float b1 = *sos++; //sos[6*k+1];
+        float b2 = *sos++; //sos[6*k+2];
+        sos++; // a0 unused
+        float a1 = *sos++; //sos[6*k+4];
+        float a2 = *sos++; //sos[6*k+5];
+
+        float w0 = value - a1 * w1 - a2 * w2;
+        value = b0 * w0 + b1 * w1 + b2 * w2;
+
+        state[2*k] = w0;
+        state[2*k+1] = w1;
+    }
+
+    return value;
+#endif
+}
+
 
 // Process a sensor reading when we are in touch mode
 // A typical probing speed is 5mm/sec. At this speed, a processing interval of 1ms will give us a probing resolution of 5um.
@@ -90,12 +164,51 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 	{
 #if 1
 		const uint32_t now = StepTimer::GetTimerTicks();
+		float freq = reading*convertToFreq;
+		if (now - startTime >= StepTimer::StepClockRate/10)		// allow for the movement start delay and some more
+		{
+			const float value = SosFilter(freq - baseFreq, sosButterworthFilter500, sosState);
+			//debugPrintf("%d F %f V %f\n", goodCnt++, (double)(freq - baseFreq), (double)value);
+			// allow filter to stabalise 
+			if (now - startTime >= StepTimer::StepClockRate/5)
+			{
+				if (value < lastValue)
+				{
+					falling = true;
+				}
+				else if (value > lastValue)
+				{
+					if (falling)
+					{
+						if (startValue - lastValue >= threshold)
+						{
+							inputMonitor->SetTriggered();
+							Stop();
+							delay(500);
+							//debugPrintf("%d Trig F %f V %f LV %f SV %f BV %f TH %f\n", goodCnt++, (double)freq, (double)value, (double)lastValue, (double)startValue, (double)baseFreq, (double)threshold);
+						}
+					}
+					falling = false;
+					startValue = value;
+				}
+				lastValue = value;
+			}
+		}
+		else
+		{
+			baseFreq = freq;
+		}
+		numBadReadings = 0;
+#elif 0
+		const uint32_t now = StepTimer::GetTimerTicks();
 		const uint32_t interval = now - lastReadingTime;
 
 		// We expect the speed to fit in 16 bits normally
 		const uint16_t currentSpeed = (uint16_t)constrain<int32_t>((((int32_t)reading - (int32_t)lastReading) * 256)/(int32_t)interval, 0, 65535);
 		const uint32_t prevSpeedSum = speedFilter.GetSum();
+		// Average the most recent 4 readings
 		const uint32_t recentSpeed = (uint32_t)currentSpeed + lastSpeed + lastSpeedMinus1 + lastSpeedMinus2;
+		// feed that into our moving average
 		speedFilter.ProcessReading((unsigned int)(recentSpeed/4));
 
 		if (now - startTime >= StepTimer::StepClockRate/10)		// allow for the movement start delay and some more
