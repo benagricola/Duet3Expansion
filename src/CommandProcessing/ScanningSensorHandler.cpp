@@ -109,17 +109,6 @@ void TouchMode::Start(uint32_t sens) noexcept
 	speedFilter.Init(0);
 #endif
 	enabled = true;
-	for(size_t i = 0; i < sosSections; i++)
-	{
-		sosState[i][0] = 0.0f;
-		sosState[i][1] = 0.0f;
-	}
-	baseFreq = 0.0f;
-	lastValue = 0.0f;
-	startValue = 0.0f;
-	falling = false;
-	threshold = 1000.0f*(1 - ((float)sensitivity/65536));
-	goodCnt = 0;
 }
 
 void TouchMode::Stop() noexcept
@@ -159,12 +148,14 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 			{
 				inputMonitor->SetTriggered();
 			}
-			debugPrintf("Bad reading %08" PRIx32 "\n", reading);
+//			debugPrintf("Bad reading %08" PRIx32 "\n", reading);
 			Stop();
 		}
 	}
 	else
 	{
+		const uint32_t now = StepTimer::GetTimerTicks();
+
 #if USE_BUTTERWORTH_FILTER
 		// Butterworth bandpass filter code and coefficients borrowed from see https://github.com/vvuk/klipper/blob/vlad/eddy-ng/src/sensor_ldc1612_ng.c
 		const float freq = (float)reading;							// no need to convert to an actual frequency here
