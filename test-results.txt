@@ -1,0 +1,95 @@
+Hi Folks, as you may know David recently added the ability to use a touch operation to support setting Z=0 using the szp probe. A key part of this is the mechanism used to detect when the nozzle contacts the bed. After some initial testing we came up with a method that uses a combination of two averaging filters that seemed to work in our initial tests. I've since been following up on those tests and I'd like to share the results I've found so far.
+First let me describe my test setup. I'm using my e3d toolchanger with a Fly SHT36 toolboard fitted to the main toolhead (the part that has the tool lock and the default Z switch probe), this board has a szp coil mounted to the underside of the toolhead. The coil is mounted in a printed mount that also provides a "nozzle" (basically a plastic part that can contact the bed). The contact point of this nozzle is 0.54mm above the point at which the probe switch triggers and the 15mm diameter coil is mounted 4mm above that. This basically means that an ideal touch probe would trigger at z=-0.54mm any higher than this and it is a false positive, any lower and the nozzle will be pressing into the bed and something will be flexing. My toolchanger is equipped with a removable steel flexplate attached using a magnetic sheet. The heated bed still has the original spring mounting posts and this plus the plate will provide a little bit of give if things go wrong!
+The tests are run using a macro that basically configures the szp then for each test homes using the standard switch probe and then performs 20 probe operations using touch mode with the szp. The stop height is recorded and mean/deviation reported. The probe operations start at a height of 3mm. I tested probing at 3 speeds 300mm/min 200mm/min 100mm/min and a range of sensitivities for the probe  trigger function (0.9 - 0.1 with 0.9 most sensitive). Here is a summary of the results for the current touch detection algorithm:
+Original moving average Start height 3mm
+speed 300 sens 0.9 mean 2.697, deviation from mean 0.113
+speed 300 sens 0.8 mean 2.316, deviation from mean 0.007
+speed 300 sens 0.7 mean 2.304, deviation from mean 0.013
+speed 300 sens 0.6 mean 2.281, deviation from mean 0.011
+speed 300 sens 0.5 mean 1.122, deviation from mean 1.273
+speed 300 sens 0.4 mean 0.478, deviation from mean 1.337
+speed 300 sens 0.3 mean 0.603, deviation from mean 1.285
+speed 300 sens 0.2 mean -0.408, deviation from mean 0.676
+speed 300 sens 0.1 Failed
+
+speed 200 sens 0.9 mean 2.846, deviation from mean 0.002
+speed 200 sens 0.8 mean 2.845, deviation from mean 0.009
+speed 200 sens 0.7 mean 2.834, deviation from mean 0.020
+speed 200 sens 0.6 mean 2.397, deviation from mean 0.247
+speed 200 sens 0.5 mean 2.242, deviation from mean 0.696
+speed 200 sens 0.4 mean 2.040, deviation from mean 0.602
+speed 200 sens 0.3 mean 1.526, deviation from mean 1.127
+speed 200 sens 0.2 mean 0.781, deviation from mean 1.374
+speed 200 sens 0.1 mean -0.446, deviation from mean 0.864
+
+speed 100 sens 0.9 mean 2.911, deviation from mean 0.022
+speed 100 sens 0.8 mean 2.593, deviation from mean 0.314
+speed 100 sens 0.7 mean 1.682, deviation from mean 1.118
+speed 100 sens 0.6 mean 1.675, deviation from mean 1.119
+speed 100 sens 0.5 mean 0.676, deviation from mean 1.383
+speed 100 sens 0.4 Failed
+As you can see none of the tests worked fully. In most cases there are one or more false positives where the system detects a touch before the nozzle actually hits the bed. This is to be expected with higher sensitivity settings (with pretty much all of the probes failing), but in this case it was still a problem even as the sensitivity was reduced. In some cases the sensitivity so was low that on some of the probes we failed to detect the touch at all (so the nozzle was driven into the bed or got so close that the coil no longer returned valid results). The above is just a summary of the tests I will attach a file with the individual probe results if you are interested.
+As you can see often the false positive is triggering at or near the same z height. I think this indicates that the trigger is not due to noise, but rather due to the readings being reported. Looking at the detailed probe debug data it seems that at various points in the z movement there are short sections of almost no movement (indicated by little change in the probe reading) followed by a larger reading. I suspect this is due either to some sort of irregularity in the threaded rod or some sort of "sticktion" in the movement. It should be noted that these "rough sections" are very short typically only a few samples which corresponds to 0.01mm or less in Z height (in my case that corresponds to less than 8 microsteps). Using higher probing speeds seems to help with these sort of false positive. I suspect that the higher speed pushing past the rough spot and also a higher speed results in fewer szp samples during that part of the movement allowing the averaging we use to ignore the false hit. Unfortunately a higher speed also reduces the accuracy of the probe and increases the energy when the nozzle does impact the bed.
+In an attempt to improve things I have added two further hit detection mechanisms. The first is a modification of our existing moving average system, using a pre-filtered reading to feed the moving average and using two samples from the moving average in the hit test logic. The results from this can been seen below:
+Modified moving Average with 4 element mean pre filter Start height 3mm
+speed 300 sens 0.9 mean 0.684, deviation from mean 1.471
+speed 300 sens 0.8 mean -0.377, deviation from mean 0.670
+speed 300 sens 0.7 mean -0.553, deviation from mean 0.004
+speed 300 sens 0.6 mean -0.572, deviation from mean 0.004
+speed 300 sens 0.5 mean -0.590, deviation from mean 0.002
+speed 300 sens 0.4 mean -0.610, deviation from mean 0.003
+speed 300 sens 0.3 mean -0.629, deviation from mean 0.001
+speed 300 sens 0.2 mean -0.643, deviation from mean 0.003
+speed 300 sens 0.1 Failed
+
+speed 200 sens 0.9 mean 2.886, deviation from mean 0.257
+speed 200 sens 0.8 mean 1.507, deviation from mean 1.533
+speed 200 sens 0.7 mean -0.434, deviation from mean 0.660
+speed 200 sens 0.6 mean -0.597, deviation from mean 0.003
+speed 200 sens 0.5 mean -0.607, deviation from mean 0.002
+speed 200 sens 0.4 mean -0.620, deviation from mean 0.003
+speed 200 sens 0.3 mean -0.635, deviation from mean 0.003
+speed 200 sens 0.2 mean -0.650, deviation from mean 0.004
+speed 200 sens 0.1 Failed
+
+speed 100 sens 0.9 mean 2.911, deviation from mean 0.022
+speed 100 sens 0.8 mean 2.593, deviation from mean 0.314
+speed 100 sens 0.7 mean 1.682, deviation from mean 1.118
+speed 100 sens 0.6 mean 1.675, deviation from mean 1.119
+speed 100 sens 0.5 mean 0.676, deviation from mean 1.383
+speed 100 sens 0.4 Failed
+This version works reasonably well triggering close to the actual contact point and has reasonable repeatability. Unfortunately it does not work very well at slower speeds which means that we can not slow down the probing to improve accuracy. But I think this version would be usable.
+The final (for now version), is based on the work of a Klipper developer (see: https://github.com/vvuk/eddy-ng/tree/main), which uses an SOS implementation of a Butterworth filter to perform hit detection. The results for this are:
+SOS Butterworth filter Start height 3mm
+speed 300 sens 0.9 mean 2.100, deviation from mean 0.030
+speed 300 sens 0.8 mean 2.097, deviation from mean 0.025
+speed 300 sens 0.7 mean 0.970, deviation from mean 1.361
+speed 300 sens 0.6 mean -0.699, deviation from mean 0.002
+speed 300 sens 0.5 mean -0.699, deviation from mean 0.002
+speed 300 sens 0.4 mean -0.699, deviation from mean 0.003
+speed 300 sens 0.3 mean -0.699, deviation from mean 0.003
+speed 300 sens 0.2 mean -0.699, deviation from mean 0.003
+speed 300 sens 0.1 mean -0.699, deviation from mean 0.002
+
+speed 200 sens 0.9 mean 2.434, deviation from mean 0.046
+speed 200 sens 0.8 mean 2.348, deviation from mean 0.004
+speed 200 sens 0.7 mean 2.366, deviation from mean 0.004
+speed 200 sens 0.6 mean 2.375, deviation from mean 0.004
+speed 200 sens 0.5 mean 1.777, deviation from mean 1.197
+speed 200 sens 0.4 mean 0.577, deviation from mean 1.464
+speed 200 sens 0.3 mean -0.619, deviation from mean 0.003
+speed 200 sens 0.2 mean -0.617, deviation from mean 0.002
+speed 200 sens 0.1 mean -0.619, deviation from mean 0.003
+
+speed 100 sens 0.9 mean 2.493, deviation from mean 0.195
+speed 100 sens 0.8 mean 2.356, deviation from mean 0.008
+speed 100 sens 0.7 mean 2.389, deviation from mean 0.003
+speed 100 sens 0.6 mean 2.390, deviation from mean 0.008
+speed 100 sens 0.5 mean 2.366, deviation from mean 0.005
+speed 100 sens 0.4 mean 0.866, deviation from mean 1.397
+speed 100 sens 0.3 mean -0.085, deviation from mean 0.795
+speed 100 sens 0.2 mean -0.539, deviation from mean 0.001
+speed 100 sens 0.1 mean -0.542, deviation from mean 0.002
+The first point to note is that the sensitivity parameter is used in a different way with this detector so the settings for that are not really comparable with the previous two sets of results. There are a number of things of interest in these results. Firstly it works pretty well in ignoring false positives it also always seems to detect the touch. However there is a cost to this, at higher speeds this seems to result in the detection point being delayed so the nozzle moves further into the bed before motion is stopped. However it does seem to work well at lower speeds which allows these to be used to mitigate the first problem. This can clearly be seen in the means. At 300mm/min we return a contact point 0f -0.699mm an overshoot of 0.15, at 200mm/min we return -0,619 overshooting by 0.07mm but at 100mm/min we return 0.539mm which has pretty much zero overshoot. Interestingly the Klipper code probes at 180mm/min, the default sensitivity used by the Klipper code is the equivalent of 0.25 in our settings.
+My conclusion is that we need to do better than our current implementation. I think both of the alternatives described above are interesting but probably need further evaluation, my current feeling is that the Butterworth filter used at a low speed is the better option. In all cases this way of homing is not for the faint of heart it is very easy to end up driving the nozzle into the bed especially during calibration (My height map currently shows a nice dip all the way along Y due to the axis beam now being slightly bent - again!). I suspect that we will need to give a lot of thought to the documentation of how to configure and calibrate this if we want to avoid possible damage.
+Oh and from my tests (and from reading the above Klipper docs) I think we may need to have a two step homing operation using different coil drive currents to get the best results. This can probably be handled in a homez.g script, but will obviously complicate things. You would almost certainly not want to use touch probing any more than you really have to.
