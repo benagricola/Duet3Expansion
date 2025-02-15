@@ -63,7 +63,10 @@ namespace TouchMode
 				 }
 			};
 	static float SosFilter(float value, const float filter[][6], float state[][2]) noexcept;
-	static float baseFreq;
+	static uint32_t baseReading;
+#if USE_FAST_TRIGGER
+	static uint32_t prevReading;
+#endif
 	static float lastValue;
 	static float startValue;
 	static bool falling;
@@ -100,11 +103,15 @@ void TouchMode::Start(uint32_t sens) noexcept
 		sosState[i][0] = 0.0f;
 		sosState[i][1] = 0.0f;
 	}
-	baseFreq = 0.0f;
+	baseReading = 0;
 	lastValue = 0.0f;
 	startValue = 0.0f;
 	falling = false;
-	threshold = (LDC1612::ClockFrequency * 500.0) * (1.0 - ((float)sensitivity/65536.0));
+#if USE_FAST_TRIGGER
+	prevReading = 0;
+#endif
+	threshold = (LDC1612::FRef * 500.0) * (1.0 - ((float)sensitivity/65536.0));
+	debugPrintf("Threshold %f\n", (double)threshold);
 	goodCnt = 0;
 #else
 	speedFilter.Init(0);
@@ -156,28 +163,31 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 	else
 	{
 		const uint32_t now = StepTimer::GetTimerTicks();
-
+		reading &= 0x0fffffff; // Mask off the error bits
 #if USE_BUTTERWORTH_FILTER
 		// Butterworth bandpass filter code and coefficients borrowed from see https://github.com/vvuk/klipper/blob/vlad/eddy-ng/src/sensor_ldc1612_ng.c
-		const float freq = (float)reading;							// no need to convert to an actual frequency here
 		if (now - startTime >= StepTimer::StepClockRate/10)			// allow for the movement start delay and some more
 		{
-			const float value = SosFilter(freq - baseFreq, sosButterworthFilter500, sosState);
-			//debugPrintf("%d F %f V %f\n", goodCnt++, (double)(freq - baseFreq), (double)value);
+			const float value = SosFilter((int32_t)reading - (int32_t)baseReading, sosButterworthFilter500, sosState);
+#if USE_FAST_TRIGGER
+			debugPrintf("%d F%d V%.2f\n", goodCnt++, ((int)reading - (int)baseReading), (double)value);
+#else
+			debugPrintf("%d Fd V%.2f S%.2f\n", goodCnt++, (double)((int)reading - (int)baseReading), (double)value, (double) startValue);
+#endif
 			// allow filter to stabilise
-			if (now - startTime >= StepTimer::StepClockRate/5)
+			if (now - startTime >= StepTimer::StepClockRate/3)
 			{
 				if (value < lastValue)
 				{
 #if USE_FAST_TRIGGER
 					if (falling)
 					{
-						if (startValue - value >= threshold)
+						if (-value >= threshold)
 						{
 							inputMonitor->SetTriggered();
 							Stop();
 							//delay(500);
-							//debugPrintf("%d Trig F %f V %f LV %f SV %f BV %f TH %f\n", goodCnt++, (double)freq, (double)value, (double)lastValue, (double)startValue, (double)baseFreq, (double)threshold);
+							debugPrintf("%d Trig F %d V %f LV %f SV %f BR %f TH %f\n", goodCnt++, (int)(reading-baseReading), (double)value, (double)lastValue, (double)startValue, (double)baseReading, (double)threshold);
 						}
 					}
 #endif
@@ -205,8 +215,11 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 		}
 		else
 		{
-			baseFreq = freq;
+			baseReading = reading;
 		}
+#if USE_FAST_TRIGGER
+		prevReading = reading;
+#endif
 		numBadReadings = 0;
 #else
 		const uint32_t interval = now - lastReadingTime;
