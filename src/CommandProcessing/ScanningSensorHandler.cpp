@@ -3,6 +3,7 @@
  *
  *  Created on: 16 Jun 2023
  *      Author: David
+ * 		Major changes to touch detection: Andy
  *
  *  This file may be distributed under the terms of the GNU GPLv3 license.
  */
@@ -43,6 +44,15 @@ namespace TouchMode
 //private:
 #if USE_BUTTERWORTH_FILTER
 	// Butterworth bandpass filter code and coefficients borrowed from https://github.com/vvuk/klipper/blob/vlad/eddy-ng/src/sensor_ldc1612_ng.c
+	//
+	// Notes on touch sensing. 
+	// The touch sensing code although using the Butterworth filter as used by Klipper is significantly different in how it detects
+	// a touch event. In particular we no longer look for a peak before the event, instead just detect the rapid fall in the
+	// output of the filter. This seems to provide a faster response and also avoids some false positives.
+	// We also make use of a threshold value that is automatically adjusted based upon the rate of change of the sensor
+	// readings (effectively the probing speed). This makes the sensitivity setting much less dependant on the probe speed. In
+	// addition when the probe is further away from the bed and at slow speeds the threshold is higher which helps
+	// avoid spurious readings.
 	static const size_t sosSections = 2;
 	static float sosState[sosSections][2];
 	static constexpr float sosButterworthFilter500[sosSections][6] =
@@ -65,7 +75,13 @@ namespace TouchMode
 	static float SosFilter(float value, const float filter[][6], float state[][2]) noexcept;
 	static uint32_t baseReading;
 #if USE_FAST_TRIGGER
+	// Following value obtained by testing various heights/sensitivities on a Fly toolboard
+	// *20 becasue the Fly board has FRef of 20 and we adjust the actual value used to compute
+	// the threshold by dividing the BaseThreshold by the actual FRef in use.
+	static const float BaseThreshold = (10000*20)/LDC1612::FRef;
+	static float computedSensitivity;
 	static uint32_t prevReading;
+	static AveragingFilter<32> speedFilter;
 #endif
 	static float lastValue;
 	static float startValue;
@@ -109,6 +125,10 @@ void TouchMode::Start(uint32_t sens) noexcept
 	falling = false;
 #if USE_FAST_TRIGGER
 	prevReading = 0;
+	speedFilter.Init(0);
+	// invert sensitivity (so low values use higher thresholds) and adjust so that 0.5 is a good
+	// default value
+	computedSensitivity = (1.0 - ((float)sensitivity/65536.0)) * 2.0;
 #endif
 	threshold = (LDC1612::FRef * 500.0) * (1.0 - ((float)sensitivity/65536.0));
 	debugPrintf("Threshold %f\n", (double)threshold);
@@ -170,7 +190,11 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 		{
 			const float value = SosFilter((int32_t)reading - (int32_t)baseReading, sosButterworthFilter500, sosState);
 #if USE_FAST_TRIGGER
-			debugPrintf("%d F%d V%.2f\n", goodCnt++, ((int)reading - (int)baseReading), (double)value);
+			const uint16_t currentSpeed = (uint16_t)constrain<int32_t>(((int32_t)reading - (int32_t)prevReading), 0, 65535);
+			speedFilter.ProcessReading(currentSpeed);
+			// compute touch threshold based on sensitivity and current speed
+			float newThreshold = (BaseThreshold - (float)speedFilter.GetSum()/speedFilter.NumAveraged()) * computedSensitivity;
+			debugPrintf("%d F%d/%d V%.2f AS %.2f S%.2f F %d\n", goodCnt++, ((int)reading - (int)baseReading), (int)currentSpeed, (double)value, (double) (float)speedFilter.GetSum()/speedFilter.NumAveraged(), (double) newThreshold, falling);
 #else
 			debugPrintf("%d Fd V%.2f S%.2f\n", goodCnt++, (double)((int)reading - (int)baseReading), (double)value, (double) startValue);
 #endif
@@ -182,7 +206,7 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 #if USE_FAST_TRIGGER
 					if (falling)
 					{
-						if (-value >= threshold)
+						if (-value >= newThreshold)
 						{
 							inputMonitor->SetTriggered();
 							Stop();
