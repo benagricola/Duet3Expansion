@@ -24,7 +24,7 @@
 #include <Interrupts.h>
 
 #define USE_BUTTERWORTH_FILTER		1
-#define USE_FAST_TRIGGER 1
+#define USE_FAST_TRIGGER			1
 
 constexpr unsigned int ResultBitsDropped = 8;		// we drop this number of least significant bits in the result
 
@@ -131,7 +131,6 @@ void TouchMode::Start(uint32_t sens) noexcept
 	computedSensitivity = (1.0 - ((float)sensitivity/65536.0)) * 2.0;
 #endif
 	threshold = (LDC1612::FRef * 500.0) * (1.0 - ((float)sensitivity/65536.0));
-	debugPrintf("Threshold %f\n", (double)threshold);
 	goodCnt = 0;
 #else
 	speedFilter.Init(0);
@@ -182,6 +181,7 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 	}
 	else
 	{
+		reading &= 0x0FFFFFFF;										// clear Amplitude Error bit
 		const uint32_t now = StepTimer::GetTimerTicks();
 		reading &= 0x0fffffff; // Mask off the error bits
 #if USE_BUTTERWORTH_FILTER
