@@ -41,6 +41,17 @@ namespace TouchMode
 //private:
 	// Butterworth bandpass filter code and coefficients borrowed from https://github.com/vvuk/klipper/blob/vlad/eddy-ng/src/sensor_ldc1612_ng.c
 	//
+	// The coefficients can be generated using the following python code, it assumes a sample rate of 500 samples/s:
+	// sos: List[List[float]] = None
+	// sos = scipy.signal.butter(
+	//            2,
+	//            [5, 25],
+	//            btype="bandpass",
+	//            fs=500,
+	//            output="sos",
+	//        ).tolist()
+	// print(sos)
+
 	// Notes on touch sensing. 
 	// The touch sensing code although using the Butterworth filter as used by Klipper is significantly different in how it detects
 	// a touch event. In particular we no longer look for a peak before the event, instead just detect the rapid fall in the
@@ -84,7 +95,6 @@ namespace TouchMode
 	static bool enabled = false;
 	static uint16_t sensitivity;
 	static uint32_t startTime;					// the time we started taking touch mode readings, in step clocks
-	static uint32_t lastReading;				// the previous reading
 	static unsigned int numBadReadings;
 
 //public:
@@ -97,7 +107,6 @@ namespace TouchMode
 void TouchMode::Start(uint32_t sens) noexcept
 {
 	sensitivity = (uint16_t)sens;				// we only send a 16-bit sensitivity
-	lastReading = 0;
 	numBadReadings = 0;
 	startTime = StepTimer::GetTimerTicks();
 	enabled = true;
