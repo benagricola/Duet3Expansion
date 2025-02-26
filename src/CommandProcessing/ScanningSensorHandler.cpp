@@ -178,7 +178,7 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 			speedFilter.ProcessReading(currentSpeed);
 			// compute touch threshold based on sensitivity and current speed
 			float newThreshold = (BaseThreshold - (float)speedFilter.GetSum()/speedFilter.NumAveraged()) * computedSensitivity;
-			debugPrintf("%d F%d/%d V%.2f AS %.2f S%.2f F %d\n", goodCnt++, ((int)reading - (int)baseReading), (int)currentSpeed, (double)value, (double) (float)speedFilter.GetSum()/speedFilter.NumAveraged(), (double) newThreshold, falling);
+			//debugPrintf("%d F%d/%d V%.2f AS %.2f S%.2f F %d\n", goodCnt++, ((int)reading - (int)baseReading), (int)currentSpeed, (double)value, (double) (float)speedFilter.GetSum()/speedFilter.NumAveraged(), (double) newThreshold, falling);
 			// allow filter to stabilise
 			if (now - startTime >= StepTimer::StepClockRate/3)
 			{
@@ -190,8 +190,7 @@ void TouchMode::ProcessReading(uint32_t reading) noexcept
 						{
 							inputMonitor->SetTriggered();
 							Stop();
-							//delay(500);
-							debugPrintf("%d Trig F %d V %f LV %f SV %f BR %f\n", goodCnt++, (int)(reading-baseReading), (double)value, (double)lastValue, (double)startValue, (double)baseReading);
+							//debugPrintf("%d Trig F %d V %f LV %f SV %f BR %f\n", goodCnt++, (int)(reading-baseReading), (double)value, (double)lastValue, (double)startValue, (double)baseReading);
 						}
 					}
 					falling = true;
