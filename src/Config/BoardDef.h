@@ -39,6 +39,8 @@
 # include "FlySHT36.h"
 #elif defined(MKSTHR3642)
 # include "MKSTHR3642v1_0.h"
+# elif defined(MNBN17R1_5)
+# include "MnBN17r1_5.h"
 #elif defined(PITBV1_0)
 # include "PITBv1_0.h"
 #elif defined(PITBV2_0)
