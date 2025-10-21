@@ -101,12 +101,13 @@ Notes
 Core wiring
 - [x] Compile-time chip selection includes `TMC_TYPE == 2240` path (basic scaffolding and current calculations present).
 - [x] Reuse of common open-loop paths (IHOLD_IRUN, CHOPCONF, microstepping, interpolation) across chip families.
-- [ ] Add 2240-specific DRV_CONF writer for CURRENT_RANGE and SLOPE_CONTROL (guarded under `TMC_TYPE == 2240`).
-- [ ] Ensure `DefaultGConfReg` for 2240 uses only 2240-valid bits (no 5160-only flags) and includes relevant options (e.g., fast_standstill, en_pwm_mode, push-pull, etc.).
+- [x] Add 2240-specific DRV_CONF writer for CURRENT_RANGE and SLOPE_CONTROL (guarded under `TMC_TYPE == 2240`).
+- [x] Ensure `DefaultGConfReg` for 2240 uses only 2240-valid bits (no 5160-only flags) and includes relevant options (e.g., fast_standstill, en_pwm_mode, push-pull, etc.).
+- [x] Ensure TCOOLTHRS/THIGH are present and used on 2240 (parity with 5160).
 
 StallGuard
 - [x] COOLCONF/SGT write/read flow present for 51xx family.
-- [ ] Confirm and use the same SGT mask/shift ([23:16]) for 2240; adjust any 2240 build guards accordingly.
+- [x] Confirm and use the same SGT mask/shift ([23:16]) for 2240; adjust any 2240 build guards accordingly.
 - [x] DRV_STATUS parsing exists and reports SG_RESULT/CS_ACTUAL.
 - [ ] Review/add any 2240-specific flag nuances to status reporting if needed.
 
@@ -125,7 +126,7 @@ Feature gating / exclusions
 
 Board/config
 - [x] `MaxTmc2240Current` and `Tmc2240SenseResistor` used for current scaling.
-- [ ] Add default/config for `TMC2240_CURRENT_RANGE` and optional `TMC2240_SLOPE_CONTROL` per board.
+- [x] Add default/config for `TMC2240_CURRENT_RANGE` and optional `TMC2240_SLOPE_CONTROL` per board (with in-file safe defaults; wire per-board next).
 - [ ] Document expected defaults in board config templates.
 
 Testing
