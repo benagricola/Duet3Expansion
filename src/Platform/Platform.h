@@ -115,6 +115,7 @@ namespace Platform
 
 	void Init();
 	void InitMinimal();
+	void InitPins();
 	void Spin();
 	void SpinMinimal();
 

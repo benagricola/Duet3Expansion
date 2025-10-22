@@ -523,10 +523,33 @@ void Platform::WriteLed(uint8_t ledNumber, bool turnOn)
 #endif
 }
 
+// Initialise pins that need to be set early (before other subsystems)
+void Platform::InitPins()
+{
+#if HAS_INIT_PINS
+	// Set pins that must be driven low early in initialization
+# ifdef InitLowPins
+	for (Pin pin : InitLowPins)
+	{
+		IoPort::SetPinMode(pin, OUTPUT_LOW);
+	}
+# endif
+
+	// Set pins that must be driven high early in initialization
+# ifdef InitHighPins
+	for (Pin pin : InitHighPins)
+	{
+		IoPort::SetPinMode(pin, OUTPUT_HIGH);
+	}
+# endif
+#endif
+}
+
 // Initialisation
 void Platform::Init()
 {
 	IoPort::Init();
+	InitPins();		// Initialize bootstrap/control pins as early as possible
 
 #if defined(TOOL1LC)
 	// On the board detect pin:
