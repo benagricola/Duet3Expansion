@@ -30,7 +30,7 @@
 
 static inline Move& GetMoveInstance() noexcept { return reprap.GetMove(); }
 
-#elif defined(EXP3HC) || defined(EXP1HCL) || defined(M23CL) || defined(PITBV1_0) || defined(PITBV2_0) || defined(STRIDEMAXV2_0) || defined(MNBN17R1_5)
+#elif defined(EXP3HC) || defined(EXP1HCL) || defined(M23CL) || defined(PITBV1_0) || defined(PITBV2_0) || defined(STRIDEMAXV2_0)
 
 static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 
@@ -93,6 +93,10 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 # endif
 # endif
 
+# if !defined(TmcSPIMaxMotorCurrent) && defined(MaxTmc5160MotorCurrent)
+# define TmcSPIMaxMotorCurrent (MaxTmc5160MotorCurrent)
+# endif
+
 #if SAME5x || SAMC21
 
 # include <Serial.h>
@@ -145,8 +149,8 @@ constexpr size_t TmcTaskStackWords = 140;					// with 100 stack words, deckingma
 constexpr float SenseResistor = 0.11;						// 0.082R external + 0.03 internal
 #elif TMC_TYPE == 5160
 // TMC5160 uses external sense resistor with 325mV reference
-// Board config defines: MaxTmc5160Current (mA) and Tmc5160SenseResistor (Ω)
-constexpr float MaximumStandstillCurrent = MaxTmc5160Current * 0.707;
+// Board config defines: TmcSPIMaxMotorCurrent (mA) and Tmc5160SenseResistor (Ω)
+constexpr float MaximumStandstillCurrent = TmcSPIMaximumMotorCurrent * 0.707;
 constexpr float RecipFullScaleCurrent = Tmc5160SenseResistor/325.0; 		// 1.0 divided by full scale current in mA
 #elif TMC_TYPE == 2240
 // TMC2240 uses Integrated Current Sensing (ICS) with RREF and KIFS constants
@@ -155,7 +159,7 @@ constexpr float RecipFullScaleCurrent = Tmc5160SenseResistor/325.0; 		// 1.0 div
 // Full-scale current: IFS = (KIFS × 1000) / Rref (mA peak)
 // Example: Rref=12kΩ, KIFS=36 → IFS=3000mA peak = 2121mA RMS
 constexpr float Tmc2240Kifs = (Tmc2240CurrentRange == 0b00) ? 11.75f : (Tmc2240CurrentRange == 0b01) ? 24.0f : 36.0f;
-constexpr float MaximumStandstillCurrent = MaximumMotorCurrent * 0.707;
+constexpr float MaximumStandstillCurrent = TmcSPIMaxMotorCurrent * 0.707;
 constexpr float RecipFullScaleCurrent = Tmc2240Rref / (Tmc2240Kifs * 1000.0f);	// reciprocal of full scale current in mA
 #endif
 
@@ -187,8 +191,8 @@ constexpr uint32_t GCONF_5130_INT_RSENSE = 1 << 1;			// use internal sense resis
 constexpr uint32_t GCONF_5130_END_COMMUTATION = 1 << 3;		// Enable commutation by full step encoder (DCIN_CFG5 = ENC_A, DCEN_CFG4 = ENC_B)
 
 constexpr uint32_t GCONF_5160_RECAL = 1 << 0;				// Zero crossing recalibration during driver disable (via ENN or via TOFF setting)
-constexpr uint32_t GCONF_5160_FASTSTANDSTILL = 1 << 1;		// Timeout for step execution until standstill detection: 1: Short time: 2^18 clocks, 0: Normal time: 2^20 clocks
-constexpr uint32_t GCONF_5160_MULTISTEP_FILT = 1 << 3;		// Enable step input filtering for stealthChop optimization with external step source (default=1)
+constexpr uint32_t GCONF_FASTSTANDSTILL = 1 << 1;			// Timeout for step execution until standstill detection: 1: Short time: 2^18 clocks, 0: Normal time: 2^20 clocks
+constexpr uint32_t GCONF_MULTISTEP_FILT = 1 << 3;			// Enable step input filtering for stealthChop optimization with external step source (default=1)
 
 constexpr uint32_t GCONF_STEALTHCHOP = 1 << 2;				// use stealthchop mode (else spread cycle mode)
 constexpr uint32_t GCONF_REV_DIR = 1 << 4;					// reverse motor direction
@@ -213,10 +217,10 @@ constexpr uint32_t GCONF_TEST_MODE = 1 << 17;				// 0: Normal operation, 1: Enab
 #if TMC_TYPE == 5130
 constexpr uint32_t DefaultGConfReg = GCONF_DIAG0_STALL | GCONF_DIAG0_PUSHPULL;
 #elif TMC_TYPE == 5160
-constexpr uint32_t DefaultGConfReg = GCONF_5160_RECAL | GCONF_5160_MULTISTEP_FILT | GCONF_DIAG0_STALL | GCONF_DIAG0_PUSHPULL;
+constexpr uint32_t DefaultGConfReg = GCONF_RECAL | GCONF_MULTISTEP_FILT | GCONF_DIAG0_STALL | GCONF_DIAG0_PUSHPULL;
 #elif TMC_TYPE == 2240
-// TMC2240 default configuration - parity with 5160: no stealthChop by default; multistep filter; no 5160-only bits
 // TMC2240 does not support RECAL
+constexpr uint32_t DefaultGConfReg = GCONF_MULTISTEP_FILT | GCONF_DIAG0_STALL | GCONF_DIAG0_PUSHPULL;
 #endif
 // General configuration and status registers
 
@@ -1027,10 +1031,8 @@ DriverMode TmcDriverState::GetDriverMode() const noexcept
 // Set the motor current
 void TmcDriverState::SetCurrent(float current) noexcept
 {
-#if TMC_TYPE == 5160
-	motorCurrent = static_cast<uint32_t>(constrain<float>(current, MinimumMotorCurrent, MaxTmc5160Current));
-#elif TMC_TYPE == 2240
-	motorCurrent = static_cast<uint32_t>(constrain<float>(current, MinimumMotorCurrent, MaximumMotorCurrent));
+#if TMC_TYPE == 5160 || TMC_TYPE == 2240
+	motorCurrent = static_cast<uint32_t>(constrain<float>(current, MinimumMotorCurrent, TmcSPIMaxMotorCurrent));
 #else
 	motorCurrent = static_cast<uint32_t>(constrain<float>(current, MinimumMotorCurrent, 2000.0));
 #endif
