@@ -58,6 +58,8 @@ using std::numeric_limits;
 
 # if SUPPORT_TMC51xx
 #  include "Movement/StepperDrivers/TMC51xx.h"
+# elif SUPPORT_TMC_SPI
+#  include "Movement/StepperDrivers/TmcSPI.h"
 # else
 #  error Cannot support closed loop with the specified hardware
 # endif
@@ -119,7 +121,7 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 	coilA = (int16_t)lrintf(cosine * magnitude);
 	coilB = (int16_t)lrintf(sine * magnitude);
 
-# if SUPPORT_TMC51xx && SINGLE_DRIVER
+# if (SUPPORT_TMC51xx || SUPPORT_TMC_SPI) && SINGLE_DRIVER
 	SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
 # else
 #  error Multi driver code not implemented

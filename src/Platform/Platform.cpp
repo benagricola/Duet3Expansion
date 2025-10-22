@@ -106,7 +106,7 @@ namespace Platform
 	static uint8_t boardVariant = 0;
 #endif
 
-#if SUPPORT_SPI_SENSORS || SUPPORT_CLOSED_LOOP || defined(ATEIO) || TMC51xx_USES_SHARED_SPI
+#if SUPPORT_SPI_SENSORS || SUPPORT_CLOSED_LOOP || defined(ATEIO) || TMC51xx_USES_SHARED_SPI || TMCSPI_USES_SHARED_SPI
 	SharedSpiDevice *sharedSpi = nullptr;
 #endif
 
@@ -674,7 +674,7 @@ void Platform::Init()
 	}
 #endif
 
-#if SUPPORT_SPI_SENSORS || SUPPORT_CLOSED_LOOP || defined(ATEIO) || TMC51xx_USES_SHARED_SPI
+#if SUPPORT_SPI_SENSORS || SUPPORT_CLOSED_LOOP || defined(ATEIO) || TMC51xx_USES_SHARED_SPI || TMCSPI_USES_SHARED_SPI
 	// Set the pin functions
 	SetPinFunction(SSPIMosiPin, SSPIMosiPinPeriphMode);
 	SetPinFunction(SSPISclkPin, SSPISclkPinPeriphMode);

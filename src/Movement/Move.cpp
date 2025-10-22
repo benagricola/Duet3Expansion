@@ -1650,7 +1650,7 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 			}
 		}
 
-#if SUPPORT_TMC51xx
+#if SUPPORT_TMC51xx || SUPPORT_TMC_SPI
 		if (parser.GetUintParam('H', val))		// set coolStep threshold
 		{
 			seen = true;
@@ -1759,7 +1759,7 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 					SmartDrivers::GetRegister(drive, SmartDriverRegister::tblank)
 				  );
 
-# if SUPPORT_TMC51xx
+# if SUPPORT_TMC51xx || SUPPORT_TMC_SPI
 		{
 			const uint32_t thigh = SmartDrivers::GetRegister(drive, SmartDriverRegister::thigh);
 			bool bdummy;
@@ -1782,7 +1782,7 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 					  );
 		}
 
-# if SUPPORT_TMC22xx || SUPPORT_TMC51xx
+# if SUPPORT_TMC22xx || SUPPORT_TMC51xx || SUPPORT_TMC_SPI
 		if (SmartDrivers::GetDriverMode(drive) == DriverMode::stealthChop)
 		{
 			const uint32_t tcoolthrs = SmartDrivers::GetRegister(drive, SmartDriverRegister::tcoolthrs);

@@ -17,5 +17,8 @@
 #if SUPPORT_TMC51xx
 # include "TMC51xx.h"
 #endif
+#if SUPPORT_TMC_SPI
+# include "TmcSPI.h"
+#endif
 
 #endif /* SRC_MOVEMENT_STEPPERDRIVERS_SMARTDRIVERS_H_ */

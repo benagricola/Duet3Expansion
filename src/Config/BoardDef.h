@@ -39,6 +39,8 @@
 # include "FlySHT36.h"
 #elif defined(MKSTHR3642)
 # include "MKSTHR3642v1_0.h"
+# elif defined(MNBN17R1_5)
+# include "MnBN17r1_5.h"
 #elif defined(PITBV1_0)
 # include "PITBv1_0.h"
 #elif defined(PITBV2_0)
@@ -93,8 +95,13 @@
 # define SUPPORT_TMC22xx				0
 # define SUPPORT_TMC2660				0
 # define SUPPORT_TMC51xx				0
+# define SUPPORT_TMC_SPI				0
 # define SUPPORT_SLOW_DRIVERS			0
 constexpr size_t NumDrivers = 0;
+#endif
+
+#if !defined(SUPPORT_TMC_SPI)
+# define SUPPORT_TMC_SPI				0
 #endif
 
 #if !defined(SUPPORT_BME280)

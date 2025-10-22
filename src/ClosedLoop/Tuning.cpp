@@ -7,6 +7,8 @@
 
 # if SUPPORT_TMC51xx
 #  include "Movement/StepperDrivers/TMC51xx.h"
+# elif SUPPORT_TMC_SPI
+#  include "Movement/StepperDrivers/TmcSPI.h"
 # else
 #  error Cannot support closed loop with the specified hardware
 # endif

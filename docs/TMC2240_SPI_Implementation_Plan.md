@@ -62,16 +62,57 @@ GCONF and DRV_CONF shape
   - Read 0x74–0x76 SG4_THRS/RESULT/IND when available and include a brief SG4 summary.
 - All the above must compile out for non-2240 builds.
 
-3.7 Excluding 5160-only features for 2240
+3.7 Current scaling (2240 vs 5160 differences)
+- TMC5160 approach:
+  - Uses external sense resistor with 325mV reference voltage
+  - Formula: `FullScaleCurrent = 325.0 / SenseResistor` (mA)
+  - Two-stage control allows scaling below fixed hardware maximum
+- TMC2240 approach:
+  - Uses Integrated Current Sensing (ICS) with RREF and KIFS
+  - Formula: `FullScaleCurrent = (KIFS × 1000) / Rref` (mA peak)
+  - KIFS determined by DRV_CONF[1:0]: 11.75, 24, or 36 A×kΩ
+  - RMS current = Peak / √2 ≈ Peak / 1.414
+- Shared algorithm with chip-specific full-scale calculation:
+  - Calculate `GLOBALSCALER = MotorCurrent × 256 × RecipFullScaleCurrent × csRecip`
+  - Clamp GLOBALSCALER to 32-256 range (0 means 256, 1-31 invalid)
+  - If out of range, adjust IRUN to compensate while keeping GLOBALSCALER valid
+  - Calculate IHOLD using standstill fraction with MaximumStandstillCurrent limit
+  - Write both IHOLD_IRUN and GLOBALSCALER registers
+- Benefits of GLOBALSCALER approach over UART's IRUN-only:
+  - **Resolution**: ~1% (256 steps) vs ~3.125% (32 steps)
+  - **Microstep quality**: Keeps IRUN in optimal 16-31 range per datasheet recommendation
+  - **Accuracy**: Fine-tuning allows precise current setting even when motor << board maximum
+  - Example: 2A motor on 3A hardware → GLOBALSCALER=171, IRUN=31 achieves ±0.2% accuracy with best microstep performance
+
+3.8 Excluding 5160-only features for 2240
 - Wrap access to: SHORT_CONF (0x09), OFFSET_READ(0x0C), motion/ramp (0x20–0x2C), DCCTRL(0x6E), LOST_STEPS(0x73), X_COMPARE(0x05), OTP_* (0x06/0x07), FACTORY_CONF(0x08).
 - Keep public APIs stable; just no-op or omit when not compiled for that chip.
 
 ## 4) Board/config integration
 
 - Keep existing TMC_TYPE selection per board. Valid: 5130, 5160 (covers 5161/2160), 2240.
-- For 2240 add board defines for:
-  - MaxTmc2240Current, Tmc2240SenseResistor (already referenced in code), and TMC2240_CURRENT_RANGE default.
-  - Optional: default SLOPE_CONTROL.
+- **TmcSPI driver is a drop-in replacement for TMC51xx driver** - board configs remain unchanged.
+- Naming convention (must match TMC51xx.cpp for compatibility):
+  - For TMC5160 boards:
+    - `MaxTmc5160Current` - maximum allowed motor current in mA (matches TMC51xx.cpp)
+    - `Tmc5160SenseResistor` - external sense resistor value in Ω (matches TMC51xx.cpp)
+    - `DefaultStandstillCurrentPercent` - default standstill percentage (typically 71-75%)
+  - For TMC2240 boards:
+    - `MaximumMotorCurrent` - maximum allowed motor current in mA (used by UART drivers)
+    - `Tmc2240Rref` - reference resistor in kΩ (chip-specific for ICS)
+    - `Tmc2240CurrentRange` - DRV_CONF[1:0] setting: 0x00=11.75, 0x01=24, 0x02/0x03=36 A×kΩ
+    - `Tmc2240SlopeControl` - DRV_CONF[5:4] for dV/dt: 0x00=120V/µs, 0x01=200V/µs, 0x02=300V/µs, 0x03=480V/µs
+    - `DefaultStandstillCurrentPercent` - default standstill percentage (typically 75%)
+- Current calculation differences:
+  - TMC5160 (external sense resistor, 325mV ref):
+    - `RecipFullScaleCurrent = Tmc5160SenseResistor / 325.0`
+    - Uses `MaxTmc5160Current` for limits
+  - TMC2240 (ICS with RREF + KIFS):
+    - `KIFS` from `Tmc2240CurrentRange` mapping: 0b00=11.75, 0b01=24, 0b10/0b11=36 A×kΩ
+    - `RecipFullScaleCurrent = Tmc2240Rref / (KIFS × 1000)`
+    - Uses `MaximumMotorCurrent` for limits
+    - Example: `Tmc2240Rref=12kΩ`, `KIFS=36` → `IFS_peak=3000mA`, `I_RMS≈2121mA`
+- Both chips use an identical two-stage GLOBALSCALER + IRUN algorithm for optimal resolution and microstep quality.
 - If a board needs SPI/UART mode strap on boot, use the existing pin init hook (or add a small PinInit table) without changing the M-code surface.
 
 ## 5) Testing and validation
@@ -125,9 +166,22 @@ Feature gating / exclusions
 - [ ] Audit code paths to ensure no accidental 5160-only register access remains under 2240.
 
 Board/config
-- [x] `MaxTmc2240Current` and `Tmc2240SenseResistor` used for current scaling.
-- [x] Add default/config for `TMC2240_CURRENT_RANGE` and optional `TMC2240_SLOPE_CONTROL` per board (with in-file safe defaults; wire per-board next).
-- [ ] Document expected defaults in board config templates.
+- [x] Board configs use existing constant names for drop-in compatibility with TMC51xx driver:
+  - TMC5160: `MaxTmc5160Current`, `Tmc5160SenseResistor`, `DefaultStandstillCurrentPercent`
+  - TMC2240: `MaximumMotorCurrent`, `Tmc2240Rref`, `Tmc2240CurrentRange`, `Tmc2240SlopeControl`, `DefaultStandstillCurrentPercent`
+- [x] Current calculation uses chip-appropriate formula with board-defined constants
+- [x] TmcSPI.cpp uses MaxTmc5160Current for TMC5160 (matches TMC51xx.cpp exactly)
+- [x] TmcSPI.cpp uses MaximumMotorCurrent for TMC2240 (matches existing UART board configs)
+
+Current setting implementation
+- [x] Update RecipFullScaleCurrent calculation to be chip-specific:
+  - TMC5160: `RecipFullScaleCurrent = Tmc5160SenseResistor / 325.0` (external sense resistor)
+  - TMC2240: `RecipFullScaleCurrent = Tmc2240Rref / (KIFS × 1000)` where KIFS determined by `Tmc2240CurrentRange`
+- [x] TMC5160 uses `MaxTmc5160Current` for current limits (matches TMC51xx.cpp)
+- [x] TMC2240 uses `MaximumMotorCurrent` for current limits (matches existing UART configs)
+- [x] Verify UpdateCurrent() algorithm works correctly with both calculation methods
+- [x] Remove any dead code or constants related to incorrect TMC2240 sense resistor approach
+- [x] Ensure `MaximumStandstillCurrent` calculated from chip-appropriate max current constant
 
 Testing
 - [ ] Phase 1: Open-loop motion on hardware (SpreadCycle/StealthChop); verify M122 common fields.
