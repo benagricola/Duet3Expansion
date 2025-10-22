@@ -836,7 +836,7 @@ bool TmcDriverState::SetDriverMode(unsigned int mode) noexcept
 	case (unsigned int)DriverMode::spreadCycle:
 		UpdateRegister(WriteGConf, writeRegisters[WriteGConf] & ~(GCONF_DIRECT_MODE | GCONF_STEALTHCHOP));
 #if TMC_TYPE == 5130
-		configuredChopConfReg = &= ~(CHOPCONF_CHM | CHOPCONF_5130_RNDTOFF);
+		configuredChopConfReg &= ~(CHOPCONF_CHM | CHOPCONF_5130_RNDTOFF);
 #else
 		configuredChopConfReg &= ~CHOPCONF_CHM;
 #endif
@@ -849,7 +849,7 @@ bool TmcDriverState::SetDriverMode(unsigned int mode) noexcept
 	case (unsigned int)DriverMode::stealthChop:
 		UpdateRegister(WriteGConf, (writeRegisters[WriteGConf] & ~GCONF_DIRECT_MODE) | GCONF_STEALTHCHOP);
 #if TMC_TYPE == 5130
-		configuredChopConfReg = &= ~(CHOPCONF_CHM | CHOPCONF_5130_RNDTOFF);
+		configuredChopConfReg &= ~(CHOPCONF_CHM | CHOPCONF_5130_RNDTOFF);
 #else
 		configuredChopConfReg &= ~CHOPCONF_CHM;
 #endif
