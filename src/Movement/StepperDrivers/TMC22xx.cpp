@@ -2433,7 +2433,7 @@ void SmartDrivers::Init() noexcept
 
 		driverStates[drive].Init(drive
 #if TMC22xx_HAS_ENABLE_PINS
-								, DriverEnablePins[drive]
+								, EnablePins[drive]
 #endif
 #if TMC22xx_VARIABLE_NUM_DRIVERS && TMC22xx_MULTIPLE_UART_PINS
 								, Tmc22xxUartPins[drive]
