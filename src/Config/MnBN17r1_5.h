@@ -89,7 +89,7 @@ constexpr Pin DriverDiagPins[NumDrivers]   = { GpioPin(12) }; // GPIO12 DRV_DIAG
 #define ACTIVE_HIGH_STEP		1		// 1 = active high, 0 = active low
 #define ACTIVE_HIGH_DIR			1		// 1 = active high, 0 = active low
 
-constexpr Pin InitLowPins[] = { GpioPin(1) };	// GPIO1 DRV_UART_ENA - pull low to enable SPI mode on TMC2240
+constexpr Pin InitHighPins[] = { GpioPin(29) };	// GPIO29 DRV_UART_ENA - pull high to enable UART mode on TMC2240
 
 #endif
 
