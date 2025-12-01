@@ -33,6 +33,7 @@ Licence: GPL
 #include <InputMonitors/InputMonitor.h>
 #include <AppNotifyIndices.h>
 #include <Movement/StepperDrivers/SmartDrivers.h>
+#include <cinttypes>
 
 #if SUPPORT_DHT_SENSOR
 # include "Sensors/DhtSensor.h"
@@ -700,7 +701,7 @@ void Heat::SuspendHeaters(bool sus) noexcept
 
 void Heat::Diagnostics(const StringRef& reply) noexcept
 {
-	reply.lcatf("Last sensors broadcast 0x%08" PRIx64 " found %u %" PRIu32 " ticks ago, %u ordering errs, loop time %" PRIu32,
+	reply.lcatf("Last sensors broadcast 0x%016" PRIx64 " found %u %" PRIu32 " ticks ago, %u ordering errs, loop time %" PRIu32,
 					lastSensorsBroadcastWhich, lastSensorsFound, millis() - lastSensorsBroadcastWhen, sensorOrderingErrors, heatTaskLoopTime);
 	sensorOrderingErrors = 0;
 #if 0	// temporary to debug a board that reports bad Vssa

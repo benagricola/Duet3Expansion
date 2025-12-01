@@ -5,26 +5,26 @@
  *		Author: Nine Mile
  */
 
-#ifndef SRC_CONFIG_MNBN17R1_5_H_
-#define SRC_CONFIG_MNBN17R1_5_H_
+#ifndef SRC_CONFIG_MNBN17R1_2_H_
+#define SRC_CONFIG_MNBN17R1_2_H_
 
 #include <Hardware/PinDescription.h>
 
-#define BOARD_TYPE_NAME			"MNBN17R1_5"
-#define BOOTLOADER_NAME			"MNBN17R1_5"
+#define BOARD_TYPE_NAME			"MNBN17R1_2"
+#define BOOTLOADER_NAME			"MNBN17R1_2"
 
 #define BOARD_USES_UF2_BINARY	1
 
 // General features
 #define HAS_VREF_MONITOR		0
-#define HAS_VOLTAGE_MONITOR		1
+#define HAS_VOLTAGE_MONITOR		0
 #define HAS_12V_MONITOR			0
 #define HAS_CPU_TEMP_SENSOR		1
 #define HAS_ADDRESS_SWITCHES	0
 #define HAS_BUTTONS				0
 #define HAS_INIT_PINS			1 // Bootstrap pins
 #define HAS_USB_SERIAL			1
-#define USE_SERIAL_DEBUG		0
+#define USE_SERIAL_DEBUG		1
 #define SUPPORT_LED_STRIPS		0
 #define SUPPORT_PIO_NEOPIXEL	0
 #define SUPPORT_INPUT_SHAPING	1
@@ -36,21 +36,15 @@
 
 #define HAS_SMART_DRIVERS		1
 #define HAS_STALL_DETECT		1
-#define SINGLE_DRIVER			0
+#define SINGLE_DRIVER			1
 #define SUPPORT_SLOW_DRIVERS	0
 #define SUPPORT_DELTA_MOVEMENT	0
 
-#define SUPPORT_CLOSED_LOOP     0
-#define SUPPORT_TMC51xx			1
-#define TMC_TYPE                2240
+#define SUPPORT_TMC51xx			0
 #define SUPPORT_TMC2660			0
-#define SUPPORT_TMC22xx			0			// TMC2240 UART mode (current default)
-#define SUPPORT_TMC2240			0
+#define SUPPORT_TMC22xx			1			// TMC2240 UART mode (current default)
+#define SUPPORT_TMC2240			1
 #define SUPPORT_TMC2209			0
-
-#define TMC51xx_USES_SHARED_SPI 1
-#define TMC51xx_USES_SEPARATE_CS		0
-#define TMC51xx_USES_SEPARATE_ENABLE	0
 
 constexpr size_t NumDrivers = 1;
 constexpr size_t MaxSmartDrivers = 1;
@@ -64,7 +58,7 @@ constexpr size_t MaxSmartDrivers = 1;
 // TMC2240 uses UART communication in current firmware implementation
 // Define the baud rate used to send/receive data to/from the drivers.
 constexpr uint32_t DriversBaudRate = 200000;		// UART baud rate for TMC2240
-// constexpr uint32_t TransferTimeout = 10;			// any transfer should complete within 10 ticks @ 1ms/tick
+constexpr uint32_t TransferTimeout = 10;			// any transfer should complete within 10 ticks @ 1ms/tick
 
 // TMC2240 current sense resistor and scaling
 constexpr uint32_t Tmc2240CurrentRange = 0x03;								// which current range we set the TMC2240 to (3A)
@@ -74,7 +68,7 @@ constexpr float DriverFullScaleCurrent = 36000/Tmc2240Rref;					// in mA, assumi
 constexpr float DriverCsMultiplier = 32.0/DriverFullScaleCurrent;
 
 constexpr float MaximumMotorCurrent = 2000.0;		// TMC2240
-constexpr float MaxTmc2240Current = MaximumMotorCurrent;
+constexpr float MaximumStandstillCurrent = 1000;
 
 constexpr uint32_t DefaultStandstillCurrentPercent = 75;
 
@@ -86,25 +80,7 @@ constexpr Pin StepPins[NumDrivers]         = { GpioPin(3) }; // GPIO3 DRV_STEP
 constexpr Pin DirectionPins[NumDrivers]    = { GpioPin(2) }; // GPIO2 DRV_DIR
 
 constexpr Pin GlobalTmc22xxEnablePin = EnablePins[0];
-constexpr Pin GlobalTmc51xxEnablePin = EnablePins[0];
-constexpr Pin GlobalTmc51xxCSPin	 = DriverSelectPins[0];
-constexpr Pin Tmc51xxEnablePins[NumDrivers] = { EnablePins[0] };
-constexpr Pin Tmc51xxCSPins[NumDrivers]      = { DriverSelectPins[0] };
 constexpr Pin Tmc22xxUartPin         = Tmc22xxUartPins[0];
-
-#if SUPPORT_SPI_SENSORS || TMC51xx_USES_SHARED_SPI
-
-// Shared SPI pin connections
-constexpr uint8_t SspiSpiInstanceNumber = 0;
-constexpr Pin SSPIMosiPin = GpioPin(7);
-constexpr GpioPinFunction SSPIMosiPinPeriphMode = GpioPinFunction::Spi;
-constexpr Pin SSPISclkPin = GpioPin(6);
-constexpr GpioPinFunction SSPISclkPinPeriphMode = GpioPinFunction::Spi;
-constexpr Pin SSPIMisoPin = GpioPin(4);
-constexpr GpioPinFunction SSPIMisoPinPeriphMode = GpioPinFunction::Spi;
-
-#endif
-
 
 #if HAS_STALL_DETECT
 constexpr Pin DriverDiagPins[NumDrivers]   = { GpioPin(12) }; // GPIO12 DRV_DIAG
@@ -113,8 +89,7 @@ constexpr Pin DriverDiagPins[NumDrivers]   = { GpioPin(12) }; // GPIO12 DRV_DIAG
 #define ACTIVE_HIGH_STEP		1		// 1 = active high, 0 = active low
 #define ACTIVE_HIGH_DIR			1		// 1 = active high, 0 = active low
 
-// UART: constexpr Pin InitHighPins[] = { GpioPin(29) };	// GPIO29 DRV_UART_ENA - pull high to enable UART mode on TMC2240
-constexpr Pin InitLowPins[] = { GpioPin(29) };	// GPIO29 DRV_UART_ENA - pull low to enable SPI mode on TMC2240
+constexpr Pin InitHighPins[] = { GpioPin(29) };	// GPIO29 DRV_UART_ENA - pull high to enable UART mode on TMC2240
 
 #endif
 
@@ -196,14 +171,14 @@ constexpr PinDescription PinTable[] =
 };
 
 constexpr size_t NumPins = ARRAY_SIZE(PinTable);
-static constexpr size_t NumRealPins = 30;				// 30 GPIO pins on RP2350A
+static constexpr size_t NumRealPins = 30;				// 30 GPIO pins on RP2040
 constexpr size_t NumVirtualPins = 0;					// No virtual pins on this board
 
 static_assert(NumPins == NumRealPins + NumVirtualPins);
 
 // Timer/counter used to generate step pulses and other sub-millisecond timings
 constexpr unsigned int StepTimerAlarmNumber = 0;
-constexpr unsigned int StepTcIRQn = TIMER0_IRQ_0;
+constexpr unsigned int StepTcIRQn = TIMER_IRQ_0;
 
 // Available UART ports
 #define NUM_SERIAL_PORTS		1
@@ -247,4 +222,4 @@ constexpr Pin SPICanCsPin = GpioPin(9);				// CAN_CS -> GPIO9
 constexpr Pin SPICanIntPin = GpioPin(13);			// CAN_INT -> GPIO17
 
 #endif
-#endif /* SRC_CONFIG_MNBN17R1_5_H_ */
+#endif /* SRC_CONFIG_MNBN17R1_2_H_ */

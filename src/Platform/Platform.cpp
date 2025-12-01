@@ -529,16 +529,20 @@ void Platform::InitPins()
 #if HAS_INIT_PINS
 	// Set pins that must be driven low early in initialization
 # ifdef InitLowPins
+	debugPrintf("InitPins: Setting %u pins LOW\n", (unsigned)ARRAY_SIZE(InitLowPins));
 	for (Pin pin : InitLowPins)
 	{
+		debugPrintf("  GPIO%u = LOW\n", (unsigned)pin);
 		IoPort::SetPinMode(pin, OUTPUT_LOW);
 	}
 # endif
 
 	// Set pins that must be driven high early in initialization
 # ifdef InitHighPins
+	debugPrintf("InitPins: Setting %u pins HIGH\n", (unsigned)ARRAY_SIZE(InitHighPins));
 	for (Pin pin : InitHighPins)
 	{
+		debugPrintf("  GPIO%u = HIGH\n", (unsigned)pin);
 		IoPort::SetPinMode(pin, OUTPUT_HIGH);
 	}
 # endif
@@ -1053,7 +1057,11 @@ void Platform::Spin()
 			debugPrintf("%s\n", reply.c_str());
 			reply.Clear();
 # endif
-
+			const MinCurMax& mcuTemperature = Platform::GetMcuTemperatures();
+			debugPrintf("MCU temperature: current %.2fC, min %.2fC, max %.2fC\n",
+						(double)mcuTemperature.current,
+						(double)mcuTemperature.minimum,
+						(double)mcuTemperature.maximum);
 			//moveInstance->DebugPrintCdda();
 # if SUPPORT_LIS3DH
 			debugPrintf("Accelerometer detected: %s", AccelerometerHandler::IsPresent() ? "yes" : "no");

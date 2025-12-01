@@ -104,7 +104,9 @@ constexpr uint32_t DriversSpiClockFrequency = 4000000;		// 4MHz SPI clock (max w
 
 constexpr uint32_t DriversDirectSleepMicroseconds = 80;		// how long the closed loop task sleeps for in each cycle
 constexpr uint32_t DriversDirectSleepClocks = (StepTimer::StepClockRate * DriversDirectSleepMicroseconds)/1000000;
-#else
+# elif defined(MNBN17R1_5)
+constexpr uint32_t DriversSpiClockFrequency = 4000000;		// 4MHz SPI clock
+# else
 // With a 2MHz SPI clock, on the 3HC the TMC task takes about 25% of the CPU time. So we now use 500kHz. This means the SPI transfer will complete in a little over 240us.
 constexpr uint32_t DriversSpiClockFrequency = 500000;		// 500kHz SPI clock
 #endif
@@ -354,6 +356,8 @@ constexpr uint32_t ADC_TEMP_MASK = 0x01FFF << ADC_TEMP_SHIFT;	// ADC temperature
 // Common data
 static constexpr size_t numTmc51xxDrivers = MaxSmartDrivers;
 
+static inline constexpr size_t GetNumTmcDrivers() { return MaxSmartDrivers; }
+
 static constexpr uint32_t MaxValidSgLoadRegister = 1023;
 static constexpr uint32_t InvalidSgLoadRegister = 1024;
 
@@ -586,6 +590,7 @@ private:
 	volatile uint8_t specialWriteRegisterNumber;
 	bool enabled;											// true if driver is enabled
 	bool versionChecked;									// true if IOIN version has been validated
+	uint8_t versionCheckFailCount;							// count of consecutive failed version checks
 };
 
 const uint8_t TmcDriverState::WriteRegNumbers[NumWriteRegisters] =
@@ -634,6 +639,7 @@ pre(!driversPowered)
 	driverBit = LocalDriversBitmap::MakeFromBits(p_driverNumber);
 	enabled = false;
 	versionChecked = false;											// will be set true after first IOIN read
+	versionCheckFailCount = 0;										// reset version check failure counter
 	registersToUpdate.store(0);
 	newRegistersToUpdate.store(0);
 	specialReadRegisterNumber = specialWriteRegisterNumber = 0xFF;
@@ -680,16 +686,12 @@ inline void TmcDriverState::UpdateRegister(size_t regIndex, uint32_t regVal) noe
 {
 	writeRegisters[regIndex] = regVal;
 	newRegistersToUpdate.fetch_or(1u << regIndex);						// flag it for sending
-	// Debug: log queued register write
-	const uint8_t dbgRegNum = (regIndex == WriteSpecial) ? (uint8_t)specialWriteRegisterNumber : WriteRegNumbers[regIndex];
-	debugPrintf("TMC d%u queue write reg 0x%02X = 0x%08" PRIx32 "\n", driverNumber, dbgRegNum, regVal);
 }
 
 // Calculate the chopper control register and flag it for sending
 void TmcDriverState::UpdateChopConfRegister() noexcept
 {
 	const uint32_t regVal = (enabled) ? configuredChopConfReg : configuredChopConfReg & ~CHOPCONF_TOFF_MASK;
-	debugPrintf("TMC d%u CHOPCONF calc 0x%08" PRIx32 "\n", driverNumber, regVal);
 	UpdateRegister(WriteChopConf, regVal);
 }
 
@@ -698,7 +700,6 @@ void TmcDriverState::SetStallDetectThreshold(int sgThreshold) noexcept
 	const uint32_t sgVal = ((uint32_t)constrain<int>(sgThreshold, -64, 63)) & 127u;
 	writeRegisters[WriteCoolConf] = (writeRegisters[WriteCoolConf] & ~COOLCONF_SGT_MASK) | (sgVal << COOLCONF_SGT_SHIFT);
 	newRegistersToUpdate.fetch_or(1u << WriteCoolConf);
-	debugPrintf("TMC d%u COOLCONF SGT=%d -> 0x%08" PRIx32 "\n", driverNumber, (int)sgThreshold, writeRegisters[WriteCoolConf]);
 }
 
 // Write all registers. This is called when the drivers are known to be powered up.
@@ -1173,7 +1174,6 @@ void TmcDriverState::SetStallDetectFilter(bool sgFilter) noexcept
 		writeRegisters[WriteCoolConf] &= ~COOLCONF_SGFILT;
 	}
 	newRegistersToUpdate.fetch_or(1u << WriteCoolConf);
-	debugPrintf("TMC d%u COOLCONF SGFILT=%u -> 0x%08" PRIx32 "\n", driverNumber, (unsigned)sgFilter, writeRegisters[WriteCoolConf]);
 }
 
 void TmcDriverState::SetStallMinimumStepsPerSecond(unsigned int stepsPerSecond) noexcept
@@ -1263,10 +1263,6 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 	{
 		registersToUpdate &= ~(1u << regIndexBeingUpdated);
 		++numWrites;
-		// Debug: log successful write
-		const uint8_t dbgRegNum = (regIndexBeingUpdated == WriteSpecial) ? (uint8_t)specialWriteRegisterNumber : WriteRegNumbers[regIndexBeingUpdated];
-		const uint32_t dbgVal = writeRegisters[regIndexBeingUpdated];
-		debugPrintf("TMC d%u write OK reg 0x%02X = 0x%08" PRIx32 "\n", driverNumber, dbgRegNum, dbgVal);
 	}
 
 	// Get the full step interval, we will need it later
@@ -1281,6 +1277,8 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 #else
 		uint32_t regVal = __builtin_bswap32(*reinterpret_cast<const uint32_t*>(rcvDataBlock + 1));
 #endif
+		const uint8_t regNum = (previousRegIndexRequested == ReadSpecial) ? specialReadRegisterNumber : ReadRegNumbers[previousRegIndexRequested];
+		debugPrintf("TMC d%u: processing RX for reg 0x%02X = 0x%08" PRIx32 "\n", driverNumber, regNum, regVal);
 		if (previousRegIndexRequested == ReadDrvStat)
 		{
 			// We treat the DRV_STATUS register separately
@@ -1341,7 +1339,20 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 		readRegisters[ReadDrvStat] &= ~TMC_RR_SG;
 	}
 
-	previousRegIndexRequested = (regIndexBeingUpdated == NoRegIndex) ? regIndexJustRequested : NoRegIndex;
+	// Update previousRegIndexRequested for the next transfer
+	// When we write, we still get back data from the previous read request, so preserve it
+	// When we read, the next transfer will return this read's data
+	if (regIndexBeingUpdated == NoRegIndex)
+	{
+		// We just did a read, so the next transfer will return this read's data
+		previousRegIndexRequested = regIndexJustRequested;
+		debugPrintf("TMC d%u: did READ, prev=%u just=%u\n", driverNumber, previousRegIndexRequested, regIndexJustRequested);
+	}
+	else
+	{
+		// We just did a write, previousRegIndexRequested stays the same
+		debugPrintf("TMC d%u: did WRITE reg=%u, prev=%u (data from prev read)\n", driverNumber, regIndexBeingUpdated, previousRegIndexRequested);
+	}
 }
 
 #if TMC_TYPE == 5160 || TMC_TYPE == 2240
@@ -1350,17 +1361,25 @@ bool TmcDriverState::CheckVersion() noexcept
 {
 	if (versionChecked)
 	{
-		return true;	// already checked
+		return true;	// already checked and passed
 	}
 
 	const uint32_t ioinReg = readRegisters[ReadIoin];
-	if (ioinReg == 0)
+	if (ioinReg == 0 || ioinReg == 0xFFFFFFFF)
 	{
-		debugPrintf("TMC d%u CheckVersion IOIN not read yet\n", driverNumber);
-		return false;	// IOIN not read yet
+		// IOIN not read yet or all bits set (invalid SPI read)
+		if (versionCheckFailCount < 20)
+		{
+			versionCheckFailCount++;
+			if (versionCheckFailCount >= 20)
+			{
+				debugPrintf("TMC d%u CheckVersion failed after 20 attempts - IOIN still 0x%08" PRIx32 "\n", driverNumber, ioinReg);
+				enabled = false;	// disable after multiple failures
+			}
+		}
+		return false;
 	}
 
-	versionChecked = true;
 	const uint32_t version = (ioinReg & IOIN_VERSION_MASK) >> IOIN_VERSION_SHIFT;
 #if TMC_TYPE == 5160
 	constexpr uint32_t expectedVersion = IOIN_VERSION_5160;
@@ -1372,11 +1391,29 @@ bool TmcDriverState::CheckVersion() noexcept
 
 	if (version != expectedVersion)
 	{
-		debugPrintf("Driver %u: %s version mismatch - expected 0x%02x, got 0x%02x. Check TMC_TYPE in board config.\n",
-			driverNumber, chipName, (unsigned int)expectedVersion, (unsigned int)version);
-		enabled = false;	// disable driver on version mismatch
+		// Version mismatch - could be transient SPI error
+		versionCheckFailCount++;
+		if (versionCheckFailCount >= 10)
+		{
+			// After 10 consecutive mismatches, assume it's a real problem
+			debugPrintf("Driver %u: %s version mismatch after %u attempts - expected 0x%02x, got 0x%02x. Check TMC_TYPE in board config.\n",
+				driverNumber, chipName, versionCheckFailCount, (unsigned int)expectedVersion, (unsigned int)version);
+			enabled = false;	// disable driver on persistent version mismatch
+			versionChecked = true;	// stop trying
+		}
+		else if (versionCheckFailCount == 1 || versionCheckFailCount == 5)
+		{
+			// Log first and 5th failure for diagnostic purposes
+			debugPrintf("Driver %u: %s version mismatch attempt %u - expected 0x%02x, got 0x%02x (retrying...)\n",
+				driverNumber, chipName, versionCheckFailCount, (unsigned int)expectedVersion, (unsigned int)version);
+		}
 		return false;
 	}
+	
+	// Version check passed!
+	versionChecked = true;
+	versionCheckFailCount = 0;	// reset failure counter
+	debugPrintf("TMC d%u version OK, enabling pin\n", driverNumber);
 	return true;
 }
 #else
@@ -1926,6 +1963,28 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 void SmartDrivers::Init() noexcept
 {
 	debugPrintf("SmartDrivers::Init TMC51xx num drivers=%u\n", (unsigned)numTmc51xxDrivers);
+	
+#if defined(MNBN17R1_5) || defined(MNBN17R1_2)
+	// CRITICAL: TMC2240 requires SD_MODE pin (GPIO29) LOW for SPI mode
+	// HIGH = UART mode, LOW = SPI mode
+	const Pin sdModePin = GpioPin(29);
+	debugPrintf("TMC2240: Checking SD_MODE pin (GPIO29)\n");
+	const bool sdModeBefore = IoPort::ReadPin(sdModePin);
+	debugPrintf("  Before: GPIO29 = %s\n", sdModeBefore ? "HIGH (UART mode)" : "LOW (SPI mode)");
+	
+	// Force it LOW to ensure SPI mode
+	IoPort::SetPinMode(sdModePin, OUTPUT_LOW);
+	delay(10);  // Allow time for mode change
+	
+	const bool sdModeAfter = IoPort::ReadPin(sdModePin);
+	debugPrintf("  After:  GPIO29 = %s\n", sdModeAfter ? "HIGH (UART mode)" : "LOW (SPI mode)");
+	
+	if (sdModeAfter)
+	{
+		debugPrintf("ERROR: Failed to set GPIO29 LOW! TMC2240 will not work in SPI mode!\n");
+	}
+#endif
+	
 	// Make sure the ENN and CS pins are high
 	TurnDriversOff();
 #if TMC51xx_USES_SEPARATE_CS
@@ -2354,6 +2413,15 @@ GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float 
 		return GCodeResult::ok;
 	}
 }
+
+#if TMC_TYPE == 2240
+
+float SmartDrivers::GetDriverTemperature(size_t driver) noexcept
+{
+	return (driver < GetNumTmcDrivers()) ? driverStates[driver].GetDriverTemperature() : 0.0;
+}
+
+#endif
 
 #endif
 
