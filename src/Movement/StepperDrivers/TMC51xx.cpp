@@ -19,26 +19,7 @@
 #include <General/Portability.h>
 #include <AppNotifyIndices.h>
 
-#if HAS_STALL_DETECT && SUPPORT_REMOTE_COMMANDS
-# include <CAN/CanInterface.h>
-#endif
-
-#if defined(DUET3_MB6HC) || defined(DUET3MINI)
-
-#include <Platform/RepRap.h>
-#include <Endstops/Endstop.h>
-
-static inline Move& GetMoveInstance() noexcept { return reprap.GetMove(); }
-#define TMC_IN_EXPANSION	0
-
-#elif defined(EXP3HC) || defined(EXP1HCL) || defined(M23CL) || defined(TOOLINDX) || defined(MNBN17)
-
 static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
-#define TMC_IN_EXPANSION	1
-
-#else
-# error cannot define GetMoveInstance
-#endif
 
 #if SAME5x || SAMC21
 
@@ -58,9 +39,7 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 
 #endif
 
-#if TMC_IN_EXPANSION
-# include <CAN/CanInterface.h>
-#endif
+#include <CAN/CanInterface.h>
 
 #if TMC_USES_SHARED_SPI
 # include <SharedSpiClient.h>
@@ -73,9 +52,7 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 # define __nocache				// only the SAME70 needs DMA buffers in non-cached memory
 #endif
 
-#if TMC_IN_EXPANSION
-static constexpr uint32_t StepClockRate = StepTimer::StepClockRate;		// the main board build has this name in scope already
-#endif
+static constexpr uint32_t StepClockRate = StepTimer::StepClockRate;
 
 #if SUPPORT_TMC51xx
 # define TMC_TYPE	5160
@@ -408,10 +385,8 @@ enum class DriversState : uint8_t
 
 static DriversState driversState = DriversState::shutDown;
 
-#if SUPPORT_REMOTE_COMMANDS || TMC_IN_EXPANSION
 static LocalDriversBitmap stallEndstopsEnabled;
 std::atomic<uint16_t> SmartDrivers::driverStallsToNotify(0);
-#endif
 
 //----------------------------------------------------------------------------------------------------------------------------------
 // Private types and methods
@@ -1272,37 +1247,16 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 	{
 		readRegisters[ReadDrvStat] |= TMC_RR_SG;
 		accumulatedDriveStatus |= TMC_RR_SG;
-#if TMC_IN_EXPANSION
 		if (stallEndstopsEnabled.IsBitSet(driverNumber))
 		{
 			stallEndstopsEnabled.ClearBit(driverNumber);
 			SmartDrivers::driverStallsToNotify |= 1u << driverNumber;
 			CanInterface::WakeAsyncSender();
 		}
-#else
-# if SUPPORT_REMOTE_COMMANDS
-		if (CanInterface::InExpansionMode())
-		{
-			if (stallEndstopsEnabled.IsBitSet(driverNumber))
-			{
-				stallEndstopsEnabled.ClearBit(driverNumber);
-				SmartDrivers::driverStallsToNotify |= 1u << driverNumber;
-				CanInterface::WakeAsyncSender();
-			}
-		}
-		else
-# endif
-		{
-			EndstopOrZProbe::SetDriversStalled(driverBit);
-		}
-#endif	// TMC_IN_EXPANSION
 	}
 	else
 	{
 		readRegisters[ReadDrvStat] &= ~TMC_RR_SG;
-#if !TMC_IN_EXPANSION
-		EndstopOrZProbe::SetDriversNotStalled(driverBit);
-#endif
 	}
 
 	previousRegIndexRequested = (regIndexBeingUpdated == NoRegIndex) ? regIndexJustRequested : NoRegIndex;
@@ -2026,11 +1980,7 @@ void SmartDrivers::Init() noexcept
 #endif
 
 	driversState = DriversState::noPower;
-	#if TMC_IN_EXPANSION
-	tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcOpenLoop);
-#else
-	tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcPriority);
-#endif
+		tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcOpenLoop);
 }
 
 // Shut down the drivers and stop any related interrupts
@@ -2374,7 +2324,6 @@ const char *_ecv_array _ecv_null SmartDrivers::CheckStallDetectionEnabled(size_t
 				: "driver %u does not support stall detection";
 }
 
-#if TMC_IN_EXPANSION
 GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float speed, const StringRef& reply) noexcept
 {
 	if (driverNumber < numTmcDrivers)
@@ -2396,14 +2345,14 @@ GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float 
 	}
 }
 
-# if SUPPORT_TMC2240_SPI
+#if SUPPORT_TMC2240_SPI
 float SmartDrivers::GetDriverTemperature(size_t driver) noexcept
 {
 	return (driver < numTmcDrivers) ? driverStates[driver].GetDriverTemperature() : 0.0;
 }
-# endif
+#endif
 
-# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 // Check periodically whether the closed-loop cycle is maintaining its intended rate, and raise a driver warning if not.
 // The V and A feedforward terms of the closed-loop controller scale with the cycle time, so a degraded rate changes the
 // controller balance and must not go unnoticed. Called regularly from the main loop; cheap when the check interval has not expired.
@@ -2437,33 +2386,8 @@ void SmartDrivers::PollClosedLoopCycleRate() noexcept
 		wasDegraded = degraded;
 	}
 }
-# endif
-#endif	// TMC_IN_EXPANSION
-
-#if SUPPORT_REMOTE_COMMANDS
-
-GCodeResult SmartDrivers::SetStallEndstopReporting(uint16_t driverNumber, float speed, const StringRef& reply) noexcept
-{
-	if (driverNumber < numTmcDrivers)
-	{
-		const char *_ecv_array _ecv_null const msg = driverStates[driverNumber].CheckStallDetectionEnabled(speed);
-		if (msg == nullptr)
-		{
-			stallEndstopsEnabled.SetBit(driverNumber);
-			return GCodeResult::ok;
-		}
-		reply.printf(msg, driverNumber);
-		return GCodeResult::error;
-	}
-	else
-	{
-		stallEndstopsEnabled.Clear();
-		driverStallsToNotify = 0;
-		return GCodeResult::ok;
-	}
-}
-
 #endif
+
 
 #endif
 
