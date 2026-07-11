@@ -732,7 +732,10 @@ void Heat::SuspendHeaters(bool sus) noexcept
 
 void Heat::Diagnostics(const StringRef& reply) noexcept
 {
-	reply.lcatf("Last sensors broadcast 0x%08" PRIx64 " found %u %" PRIu32 " ticks ago, %u ordering errs, loop time %" PRIu32,
+	// PRIx64 is not defined by some arm-none-eabi gcc/newlib header combinations (GCC's <stdint.h>
+	// supplies int64_t but not newlib's __int64_t_defined flag, so <inttypes.h> omits PRIx64).
+	// uint64_t is "unsigned long long" on this 32-bit target, so use the literal "llx" here.
+	reply.lcatf("Last sensors broadcast 0x%08" "llx" " found %u %" PRIu32 " ticks ago, %u ordering errs, loop time %" PRIu32,
 					lastSensorsBroadcastWhich, lastSensorsFound, millis() - lastSensorsBroadcastWhen, sensorOrderingErrors, heatTaskLoopTime);
 	sensorOrderingErrors = 0;
 #if 0	// temporary to debug a board that reports bad Vssa
