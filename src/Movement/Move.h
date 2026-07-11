@@ -566,7 +566,7 @@ inline void Move::InsertDM(DriveMovement *dm) noexcept
 // This is called from the stepper drivers SPI interface ISR
 inline __attribute__((always_inline)) uint32_t Move::GetStepInterval(size_t drive, uint32_t microstepShift) const noexcept
 {
-	AtomicCriticalSectionLocker lock;
+	MotionCriticalSectionLocker lock;
 	return dms[drive].GetStepInterval(microstepShift);
 }
 

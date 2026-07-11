@@ -35,6 +35,10 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 
 #include <CAN/CanInterface.h>
 
+#if TMC_ON_CORE1
+# include <Platform/Core1Runtime.h>
+#endif
+
 #if TMC_USES_SHARED_SPI
 # include <SharedSpiClient.h>
 # ifndef TMC_USES_SERCOM
@@ -100,6 +104,9 @@ static uint32_t DriversDirectSleepClocks = DefaultSpiSleepClocks;	// how long th
 constexpr uint32_t DriversSpiClockFrequency = 2000000;		// 2MHz SPI clock
 #endif
 
+#if TMC_ON_CORE1
+static volatile bool stallWakePending = false;		// set by the core-1 loop, serviced by SmartDrivers::Spin on core 0
+#endif
 static volatile uint32_t clCycleCount = 0;			// closed-loop/phase-step cycles completed since last read
 static volatile uint32_t clCycleOverruns = 0;		// of those, cycles that missed their wakeup deadline by at least half a period
 
@@ -1241,7 +1248,11 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 		{
 			stallEndstopsEnabled.ClearBit(driverNumber);
 			SmartDrivers::driverStallsToNotify |= 1u << driverNumber;
+#if TMC_ON_CORE1
+			stallWakePending = true;						// FreeRTOS calls are not allowed from core 1; SmartDrivers::Spin forwards this
+#else
 			CanInterface::WakeAsyncSender();
+#endif
 		}
 	}
 	else
@@ -1411,12 +1422,20 @@ static void TmcTimerCallback(CallbackParameter) noexcept
 }
 #endif
 
+#if TMC_ON_CORE1
+extern "C" [[noreturn]] void TmcLoop(void *) noexcept;
+extern "C" [[noreturn]] TIME_CRITICAL void TmcCore1Entry() noexcept
+{
+	TmcLoop(nullptr);
+}
+#endif
+
 extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 {
 #if !TMC_USES_SHARED_SPI
 	InitialiseDMA();
 #endif
-#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#if (SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP) && !TMC_ON_CORE1
 	tmcTimer.SetCallback(TmcTimerCallback, (CallbackParameter)0);
 #endif
 	bool timedOut = true;
@@ -1424,7 +1443,11 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 	{
 		if (driversState == DriversState::noPower)
 		{
+#if TMC_ON_CORE1
+			Core1Runtime::Yield(StepTimer::GetTimerTicks() + StepTimer::StepClockRate/1000);	// service core-1 housekeeping and check again in about 1ms
+#else
 			TaskBase::TakeIndexed(NotifyIndices::Tmc);
+#endif
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 			lastWakeupTime = StepTimer::GetTimerTicks();
 #endif
@@ -1542,6 +1565,11 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 
 		// Kick off a transfer.
 #if TMC_USES_SHARED_SPI
+#if TMC_ON_CORE1
+		// Core 1 owns this SPI bus outright (the clock/mode were latched at initialisation), and a
+		// FreeRTOS mutex cannot be taken from bare-metal code anyway
+		timedOut = false;
+#else
 		if (!spiDevice->Select(TransferTimeout))
 		{
 			debugPrintf("timeout\n");
@@ -1550,6 +1578,7 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 			continue;
 		}
 		timedOut = false;
+#endif
 # if TMCSPI_USES_SEPARATE_CS
 		writeBufPtr = tmcSendData + 5 * numTmcDrivers;
 		volatile uint8_t *readBufPtr = tmcRcvData + 5 * numTmcDrivers;
@@ -1585,7 +1614,9 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 		spiDevice->TransceivePacket(const_cast<uint8_t*>(tmcSendData), const_cast<uint8_t*>(tmcRcvData), sizeof(tmcSendData));
 		fastDigitalWriteHigh(GlobalTmcCSPin);			// set CS high
 # endif
+#if !TMC_ON_CORE1
 		spiDevice->Deselect();
+#endif
 # if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 		++clCycleCount;
 		// Do not reset lastWakeupTime here: the wakeup deadline sequence must advance by a fixed period per
@@ -1650,7 +1681,21 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 		}
 #endif
 # if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
-#  if TMC_USES_SHARED_SPI
+#  if TMC_ON_CORE1
+		// Core-1 pacing: advance the absolute deadline, degrade gracefully if grossly late (same policy
+		// as the task version below), then let the core-1 runtime service its housekeeping (heartbeat,
+		// park requests, mailbox) until the deadline.
+		lastWakeupTime += DriversDirectSleepClocks;
+		{
+			const uint32_t lateness = StepTimer::GetTimerTicks() - lastWakeupTime;
+			if ((int32_t)lateness > 0 && lateness >= DriversDirectSleepClocks/2)
+			{
+				++clCycleOverruns;
+				lastWakeupTime = StepTimer::GetTimerTicks() + DriversDirectSleepClocks;
+			}
+		}
+		Core1Runtime::Yield(lastWakeupTime);
+#  elif TMC_USES_SHARED_SPI
 		// Blocking shared-SPI transport (RP): the transfer above completed synchronously, so we pace the
 		// closed-loop / phase-stepping iterations here at a regular interval (DriversDirectSleepMicroseconds).
 		// On the DMA (SAME5x) transport this inter-cycle pacing is done in RxDmaCompleteCallback instead.
@@ -1770,14 +1815,24 @@ void SmartDrivers::Init() noexcept
 	}
 
 	driversState = DriversState::noPower;
-		tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcOpenLoop);
+	#if TMC_ON_CORE1
+	spiDevice->Select();									// latch the SPI clock and mode into the hardware once; core 1 then uses the bus without the mutex
+	spiDevice->Deselect();
+	Core1Runtime::Start(TmcCore1Entry);
+#else
+	tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcOpenLoop);
+#endif
 }
 
 // Shut down the drivers and stop any related interrupts
 void SmartDrivers::Exit() noexcept
 {
 	digitalWrite(GlobalTmcEnablePin, true);					// disable the drivers
+#if TMC_ON_CORE1
+	(void)Core1Runtime::Park();								// the core-1 loop cannot be terminated, so park it
+#else
 	tmcTask.TerminateAndUnlink();
+#endif
 	driversState = DriversState::shutDown;						// prevent Spin() calls from doing anything
 }
 
@@ -1928,7 +1983,16 @@ bool SmartDrivers::SetDriverMode(size_t driver, unsigned int mode) noexcept
 		return false;
 	}
 #endif
-	return driverStates[driver].SetDriverMode(mode);
+	const bool ret = driverStates[driver].SetDriverMode(mode);
+#if SUPPORT_CLOSED_LOOP && !TMC_ON_CORE1
+	if (ret && driver == 0)
+	{
+		// Restore the priority arrangement the previous expansion driver used: the task runs above the
+		// CAN receive task only while the high-rate direct-mode cycle is active
+		tmcTask.SetPriority((mode == (unsigned int)DriverMode::direct) ? TaskPriority::TmcClosedLoop : TaskPriority::TmcOpenLoop);
+	}
+#endif
+	return ret;
 }
 
 DriverMode SmartDrivers::GetDriverMode(size_t driver) noexcept
@@ -1940,6 +2004,13 @@ DriverMode SmartDrivers::GetDriverMode(size_t driver) noexcept
 // Before the first call to this function with 'powered' true, you must call Init()
 void SmartDrivers::Spin(bool powered) noexcept
 {
+#if TMC_ON_CORE1
+	if (stallWakePending)
+	{
+		stallWakePending = false;
+		CanInterface::WakeAsyncSender();
+	}
+#endif
 	TaskCriticalSectionLocker lock;
 
 	if (powered)
@@ -1947,7 +2018,9 @@ void SmartDrivers::Spin(bool powered) noexcept
 		if (driversState == DriversState::noPower)
 		{
 			driversState = DriversState::notInitialised;
-			tmcTask.Give(NotifyIndices::Tmc);				// wake up the TMC task because the drivers need to be initialised
+#if !TMC_ON_CORE1
+			tmcTask.Give(NotifyIndices::Tmc);				// wake up the TMC task because the drivers need to be initialised (the core-1 loop polls instead)
+#endif
 		}
 	}
 	else if (driversState != DriversState::shutDown)

@@ -7,6 +7,17 @@
 
 #include "AS5047D.h"
 
+#if TMC_ON_CORE1
+// The control loop on core 1 owns the encoder SPI bus: the clock and mode are latched during
+// initialisation (which runs on core 0 through the normal Select path), and every core-0 access
+// afterwards parks the core-1 loop first. A FreeRTOS mutex cannot be taken from core 1.
+# define EncoderSpiSelect()		(true)
+# define EncoderSpiDeselect()	((void)0)
+#else
+# define EncoderSpiSelect()		(spi.Select(0))
+# define EncoderSpiDeselect()	(spi.Deselect())
+#endif
+
 #if SUPPORT_CLOSED_LOOP
 
 #include <Hardware/IoPorts.h>
@@ -128,7 +139,7 @@ void AS5047D::Disable() noexcept
 TIME_CRITICAL
 bool AS5047D::GetRawReading() noexcept
 {
-	if (spi.Select(0))			// get the mutex and set the clock rate
+	if (EncoderSpiSelect())		// get the mutex and set the clock rate (a no-op on core 1, which owns this bus)
 	{
 		uint16_t response;
 		bool ok;
@@ -148,7 +159,7 @@ bool AS5047D::GetRawReading() noexcept
 						 DoSpiTransaction(AddParityBit(AS5047ReadCommand | AS5047RegAngleCom), response));
 			anglePipelined = ok;
 		}
-		spi.Deselect();			// release the mutex
+		EncoderSpiDeselect();	// release the mutex (no-op on core 1)
 		if (ok && CheckResponse(response))
 		{
 			rawReading = response & 0x3FFF;
@@ -163,7 +174,7 @@ bool AS5047D::GetRawReading() noexcept
 // Get the diagnostic register and the error flags register
 bool AS5047D::GetDiagnosticRegisters(DiagnosticRegisters& regs) noexcept
 {
-	if (spi.Select(0))			// get the mutex and set the clock rate
+	if (EncoderSpiSelect())		// get the mutex and set the clock rate (a no-op on core 1, which owns this bus)
 	{
 		anglePipelined = false;										// these transactions interrupt the streaming angle read pipeline
 		const bool ok = DoSpiTransaction(AddParityBit(AS5047ReadCommand | AS5047RegDiag), regs.diag)
@@ -173,7 +184,7 @@ bool AS5047D::GetDiagnosticRegisters(DiagnosticRegisters& regs) noexcept
 						 DoSpiTransaction(AddParityBit(AS5047ReadCommand | AS5047RegErrfl), regs.mag))
 					 && (DelayCycles(GetCurrentCycles(), Clocks350ns), 				// need at least 350ns CS high time
 						 DoSpiTransaction(AddParityBit(AS5047ReadCommand | AS5047RegNop), regs.errFlags));
-		spi.Deselect();			// release the mutex
+		EncoderSpiDeselect();	// release the mutex (no-op on core 1)
 		return ok;
 	}
 

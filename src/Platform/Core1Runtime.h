@@ -29,11 +29,18 @@ namespace Core1Runtime
 		ping,										// reply with arg0 + 1 in the result, to prove the mailbox works
 	};
 
-	void Init() noexcept;							// claim the spinlock etc.; call before Start and before any CrossCoreCriticalSection use
-	void Start() noexcept;							// launch the core-1 main loop
+	typedef void (*Core1EntryFn)() noexcept;
+
+	void Init() noexcept;							// claim the spinlocks etc.; call before Start and before any cross-core locker use
+	void Start() noexcept;							// launch the default core-1 main loop (idle: heartbeat/park/mailbox only)
+	void Start(Core1EntryFn entry) noexcept;		// launch a specific core-1 entry (e.g. the TMC control loop); it must call Yield() regularly
 	bool IsStarted() noexcept;
 
-	bool Park() noexcept;							// ask core 1 to park in its idle loop; returns true when it acknowledged (bounded wait)
+	// Service core-1 housekeeping (heartbeat, park requests, mailbox) until the given step-timer
+	// deadline. Called only from core-1 code, between control cycles.
+	void Yield(uint32_t untilStepTicks) noexcept;
+
+	bool Park() noexcept;							// ask core 1 to park in its idle loop; returns true when it acknowledged (bounded wait). Nestable.
 	void Resume() noexcept;
 
 	// Send a command and wait (bounded) for completion. Returns false on timeout.
@@ -42,8 +49,20 @@ namespace Core1Runtime
 	uint32_t GetHeartbeat() noexcept;				// increments continuously while the core-1 loop is alive
 	bool IsParked() noexcept;
 
-	spin_lock_t *GetCrossCoreLock() noexcept;		// initialised by Init()
+	spin_lock_t *GetCrossCoreLock() noexcept;		// guards the motion segment structures; initialised by Init()
+	spin_lock_t *GetSegmentPoolLock() noexcept;		// guards the MoveSegment freelist (separate lock: the motion lock is held while segments are released)
 }
+
+// Scoped park of the core-1 loop, for core-0 sequences that must not run concurrently with it
+// (encoder reconfiguration, closed-loop mode switches, encoder diagnostics). Nestable.
+class Core1ParkLocker
+{
+public:
+	Core1ParkLocker() noexcept { (void)Core1Runtime::Park(); }
+	~Core1ParkLocker() { Core1Runtime::Resume(); }
+	Core1ParkLocker(const Core1ParkLocker&) = delete;
+	Core1ParkLocker& operator=(const Core1ParkLocker&) = delete;
+};
 
 // Scoped cross-core critical section: takes the hardware spinlock with interrupts disabled on the
 // calling core. Both cores must use this (not AtomicCriticalSectionLocker) around any structure

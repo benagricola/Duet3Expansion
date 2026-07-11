@@ -810,7 +810,7 @@ void Move::StopDrivers(uint16_t whichDrives) noexcept
 	LocalDriversBitmap dr(whichDrives);
 	dr.Iterate([this](size_t drive, unsigned int)
 				{
-					AtomicCriticalSectionLocker lock;
+					MotionCriticalSectionLocker lock;
 					dms[drive].StopDriverFromRemote();
 #if !SINGLE_DRIVER
 					DeactivateDM(&dms[drive]);
@@ -1060,7 +1060,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 		MoveSegment *prev = nullptr;
 
 #if SAMC21 || RPXXXX
-		const uint32_t oldFlags = IrqSave();
+		const uint32_t oldFlags = MotionLockSave();
 #else
 		const uint32_t oldPrio = ChangeBasePriority(NvicPriorityStep);					// shut out the step interrupt
 #endif
@@ -1078,7 +1078,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 					const int32_t overlap = endTime - startTime;
 					LogStepError(3);
 #if SAMC21 || RPXXXX
-					IrqRestore(oldFlags);
+					MotionLockRestore(oldFlags);
 #else
 					RestoreBasePriority(oldPrio);
 #endif
@@ -1118,7 +1118,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 		}
 
 #if SAMC21 || RPXXXX
-		IrqRestore(oldFlags);
+		MotionLockRestore(oldFlags);
 #else
 		RestoreBasePriority(oldPrio);
 #endif
@@ -1206,7 +1206,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 	// Don't do this until we have added all the segments for this move, because the first segment we added may have been modified and/or split when we added further segments to implement input shaping
 	{
 #if SAMC21 || RPXXXX
-		const uint32_t oldFlags = IrqSave();
+		const uint32_t oldFlags = MotionLockSave();
 #else
 		const uint32_t oldPrio = ChangeBasePriority(NvicPriorityStep);					// shut out the step interrupt
 #endif
@@ -1251,7 +1251,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 			}
 		}
 #if SAMC21 || RPXXXX
-		IrqRestore(oldFlags);
+		MotionLockRestore(oldFlags);
 #else
 		RestoreBasePriority(oldPrio);
 #endif
@@ -1264,7 +1264,7 @@ void Move::AddLinearSegments(size_t drive, uint32_t startTime, const PrepParams&
 int32_t Move::GetAccumulatedExtrusion(size_t driver, bool& isPrinting) noexcept
 {
 	DriveMovement& dm = dms[driver];
-	AtomicCriticalSectionLocker lock;							// we don't want a move to complete and the ISR update the movement accumulators while we are doing this
+	MotionCriticalSectionLocker lock;							// we don't want a move to complete and the ISR update the movement accumulators while we are doing this
 	const int32_t ret = dm.movementAccumulator;
 	const int32_t adjustment = dm.GetNetStepsTakenThisSegment();
 	dm.movementAccumulator = -adjustment;
@@ -1628,6 +1628,9 @@ GCodeResult Move::ProcessM569(const CanMessageGeneric& msg, const StringRef& rep
 			seen = true;
 # if SUPPORT_CLOSED_LOOP
 			// Enable/disabled closed loop control
+#if TMC_ON_CORE1
+			Core1ParkLocker parkLocker;					// keep the core-1 loop out of the encoder and segments during the transition
+#endif
 			const ClosedLoopMode mode = (val == (uint32_t)DriverMode::direct) ? ClosedLoopMode::closed
 										: (val == (uint32_t)DriverMode::direct + 1) ? ClosedLoopMode::assistedOpen
 											: ClosedLoopMode::open;
@@ -2319,6 +2322,15 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 TIME_CRITICAL
 void Move::PhaseStepControlLoop() noexcept
 {
+#if TMC_ON_CORE1
+	// In open loop the step interrupt on core 0 owns the motion segments and core-0 code may
+	// reconfigure the encoder, so the core-1 loop must not touch either. Closed-loop mode changes
+	// and encoder reconfiguration park core 1 around the transition.
+	if (!dms[0].closedLoopControl.IsClosedLoopEnabled())
+	{
+		return;
+	}
+#endif
 	// Record the control loop call interval
 	const StepTimer::Ticks loopCallTime = StepTimer::GetTimerTicks();
 	const StepTimer::Ticks timeElapsed = loopCallTime - prevPSControlLoopCallTime;

@@ -30,6 +30,7 @@
  */
 
 #include "ClosedLoop.h"
+#include <Platform/Core1Runtime.h>
 
 #if SUPPORT_CLOSED_LOOP
 
@@ -294,6 +295,11 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 			reply.copy("encoder SPI bus is busy");
 			return GCodeResult::error;
 		}
+#if TMC_ON_CORE1
+		// The core-1 loop reads the encoder without taking the bus mutex (it cannot block on a FreeRTOS
+		// mutex), so owning the bus does not stop it: park it for the whole sequence instead
+		Core1ParkLocker parkLocker;
+#endif
 
 		// We set the mode to open loop earlier in this function so no need to do it here
 		DeleteObject(encoder);
@@ -1083,6 +1089,9 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	reply.catf(", encoder type %s", GetEncoderType().ToString());
 	if (encoder != nullptr)
 	{
+#if TMC_ON_CORE1
+		Core1ParkLocker parkLocker;						// the encoder SPI cannot be shared with the core-1 loop; this pause costs about one control cycle
+#endif
 		if (!encoder->TakeReading())
 		{
 			reply.cat(", error reading encoder\n");

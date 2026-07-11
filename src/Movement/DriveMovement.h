@@ -14,6 +14,7 @@
 
 #include <Platform/Tasks.h>
 #include "MoveSegment.h"
+#include "MotionLocking.h"
 #include "ExtruderShaper.h"
 
 #if SUPPORT_CLOSED_LOOP
@@ -205,7 +206,7 @@ inline uint32_t DriveMovement::GetStepInterval(uint32_t microstepShift) const no
 inline bool DriveMovement::GetCurrentMotion(uint32_t when, MotionParameters& mParams) noexcept
 {
 	bool hasMotion = false;
-	AtomicCriticalSectionLocker lock;								// we don't want 'segments' changing while we do this
+	MotionCriticalSectionLocker lock;								// we don't want 'segments' changing while we do this
 
 	MoveSegment *seg = segments;
 	while (seg != nullptr)

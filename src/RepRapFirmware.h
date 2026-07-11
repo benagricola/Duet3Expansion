@@ -50,6 +50,15 @@ extern "C" void debugVprintf(const char *fmt, va_list vargs) noexcept;
 // share; core 1 traffic evicts core 0's code, and the cache layout changes with every build).
 // On the RP2040 we leave code in flash instead: RAM there is needed for the firmware-update staging
 // buffer (see MaxFirmwareSize), and RP2040 boards do not run the timing-critical closed-loop control.
+// TMC_ON_CORE1: run the TMC/closed-loop control cycle bare-metal on core 1 (RP2350 only).
+// Requires the CAN chip to be serviced from core 0.
+#ifndef TMC_ON_CORE1
+# define TMC_ON_CORE1	0
+#endif
+#if TMC_ON_CORE1 && !SPICAN_CORE0_SERVICE
+# error TMC_ON_CORE1 requires SPICAN_CORE0_SERVICE
+#endif
+
 #if RPXXXX && !PICO_RP2040
 # define TIME_CRITICAL			__attribute__((section(".time_critical")))
 # define TIME_CRITICAL_RODATA	__attribute__((section(".time_critical.rodata")))

@@ -15,18 +15,18 @@ unsigned int MoveSegment::numCreated = 0;
 // Allocate a MoveSegment, from the freelist if possible, else create a new one
 MoveSegment *MoveSegment::Allocate(MoveSegment *p_next) noexcept
 {
-	const auto iflags = IrqSave();
+	const auto iflags = SegmentPoolLockSave();
 	MoveSegment * ms = freeList;
 	if (ms != nullptr)
 	{
 		freeList = ms->GetNext();
-		IrqRestore(iflags);
+		SegmentPoolLockRestore(iflags);
 		ms->nextAndFlags = reinterpret_cast<uint32_t>(p_next);
 	}
 	else
 	{
 		++numCreated;
-		IrqRestore(iflags);
+		SegmentPoolLockRestore(iflags);
 		ms = new MoveSegment(p_next);
 	}
 	return ms;

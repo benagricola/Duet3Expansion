@@ -13,6 +13,8 @@
 #include <pico/multicore.h>
 #include <hardware/structs/timer.h>
 #include <Platform/Tasks.h>
+#include <Movement/StepTimer.h>
+#include <atomic>
 
 namespace Core1Runtime
 {
@@ -28,13 +30,16 @@ namespace Core1Runtime
 	static volatile uint32_t cmdResult = 0;					// written by core 1 before bumping cmdAckSeq
 
 	static spin_lock_t *crossCoreLock = nullptr;
+	static spin_lock_t *segmentPoolLock = nullptr;
 	static bool started = false;
+	static std::atomic<int> parkDepth(0);
+	static Core1EntryFn core1Entry = nullptr;
 
-	// The core-1 main loop. Bare metal: no scheduler, no interrupts expected on this core.
-	// Phase C replaces the body of the active branch with the TMC control cycle.
-	[[noreturn]] TIME_CRITICAL static void MainLoop() noexcept
+	// Service housekeeping until the deadline. This is the only place core 1 parks, so a worker entry
+	// (e.g. the TMC control loop) must call it between cycles. Bare metal: no scheduler on this core.
+	TIME_CRITICAL void Yield(uint32_t untilStepTicks) noexcept
 	{
-		for (;;)
+		do
 		{
 			++heartbeat;
 			if (parkRequested)
@@ -42,34 +47,41 @@ namespace Core1Runtime
 				parked = true;
 				while (parkRequested)
 				{
-					__wfe();									// cheap wait; Resume() follows a spin_unlock or SEV soon enough
+					__wfe();								// cheap wait; Resume() or any SEV wakes us to recheck
 				}
 				parked = false;
 			}
-			else
+			else if (cmdSeq != cmdAckSeq)
 			{
-				if (cmdSeq != cmdAckSeq)
+				switch (cmdOp)
 				{
-					switch (cmdOp)
-					{
-					case Command::ping:
-						cmdResult = cmdArg0 + 1;
-						break;
-					default:
-						cmdResult = 0;
-						break;
-					}
-					__dmb();									// result must be visible before the acknowledgement
-					cmdAckSeq = cmdSeq;
-					__sev();
+				case Command::ping:
+					cmdResult = cmdArg0 + 1;
+					break;
+				default:
+					cmdResult = 0;
+					break;
 				}
+				__dmb();									// result must be visible before the acknowledgement
+				cmdAckSeq = cmdSeq;
+				__sev();
 			}
+		} while ((int32_t)(untilStepTicks - StepTimer::GetTimerTicks()) > 0);
+	}
+
+	// The default core-1 entry: nothing to do but housekeeping
+	[[noreturn]] TIME_CRITICAL static void MainLoop() noexcept
+	{
+		for (;;)
+		{
+			Yield(StepTimer::GetTimerTicks() + 1000);
 		}
 	}
 
 	extern "C" [[noreturn]] TIME_CRITICAL void Core1RuntimeEntry() noexcept
 	{
-		MainLoop();
+		(core1Entry != nullptr ? core1Entry : MainLoop)();
+		for (;;) { }										// entries never return; keep the compiler happy
 	}
 
 	void Init() noexcept
@@ -77,13 +89,15 @@ namespace Core1Runtime
 		if (crossCoreLock == nullptr)
 		{
 			crossCoreLock = spin_lock_instance((uint)spin_lock_claim_unused(true));
+			segmentPoolLock = spin_lock_instance((uint)spin_lock_claim_unused(true));
 		}
 	}
 
-	void Start() noexcept
+	void Start(Core1EntryFn entry) noexcept
 	{
 		if (!started)
 		{
+			core1Entry = entry;
 			Init();
 			multicore_reset_core1();
 			delay(2);
@@ -92,10 +106,19 @@ namespace Core1Runtime
 		}
 	}
 
+	void Start() noexcept
+	{
+		Start(nullptr);
+	}
+
 	bool IsStarted() noexcept { return started; }
 
 	bool Park() noexcept
 	{
+		if (parkDepth.fetch_add(1) != 0)
+		{
+			return parked || !started;							// someone else already requested the park
+		}
 		if (!started)
 		{
 			return true;										// nothing running on core 1, so it is trivially parked
@@ -116,8 +139,11 @@ namespace Core1Runtime
 
 	void Resume() noexcept
 	{
-		parkRequested = false;
-		__sev();
+		if (parkDepth.fetch_sub(1) == 1)
+		{
+			parkRequested = false;
+			__sev();
+		}
 	}
 
 	bool SendCommand(Command cmd, uint32_t arg0, uint32_t& result, uint32_t timeoutMillis) noexcept
@@ -149,6 +175,7 @@ namespace Core1Runtime
 	bool IsParked() noexcept { return parked; }
 
 	spin_lock_t *GetCrossCoreLock() noexcept { return crossCoreLock; }
+	spin_lock_t *GetSegmentPoolLock() noexcept { return segmentPoolLock; }
 }
 
 // Strong overrides of the weak CoreN2G hooks: flash operations park our core-1 runtime through the

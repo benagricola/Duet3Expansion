@@ -23,6 +23,7 @@
 #define SRC_MOVEMENT_MOVESEGMENT_H_
 
 #include <RepRapFirmware.h>
+#include "MotionLocking.h"
 #include <Platform/Tasks.h>
 #include <new>		// for align_val_t
 
@@ -254,10 +255,10 @@ inline bool MoveSegment::NormaliseAndCheckLinear(motioncalc_t distanceCarriedFor
 // Release a MoveSegment
 inline void MoveSegment::Release(MoveSegment *item) noexcept
 {
-	const auto iflags = IrqSave();
+	const auto iflags = SegmentPoolLockSave();
 	item->nextAndFlags = reinterpret_cast<uint32_t>(freeList);
 	freeList = item;
-	IrqRestore(iflags);
+	SegmentPoolLockRestore(iflags);
 }
 
 inline MoveSegment *MoveSegment::GetNext() const noexcept
