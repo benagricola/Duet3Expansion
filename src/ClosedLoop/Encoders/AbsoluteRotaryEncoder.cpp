@@ -24,6 +24,7 @@ AbsoluteRotaryEncoder::AbsoluteRotaryEncoder(uint32_t p_stepsPerRev, unsigned in
 {}
 
 // Take a reading and store at least currentCount and currentPhasePosition. Return true if error, false if success.
+TIME_CRITICAL
 bool AbsoluteRotaryEncoder::TakeReading() noexcept
 {
 	const bool ok = GetRawReading();

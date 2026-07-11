@@ -6,6 +6,7 @@
  */
 
 #include "Platform.h"
+#include <Platform/Core1Runtime.h>
 
 #include <Hardware/IoPorts.h>
 #include <AnalogIn.h>
@@ -875,6 +876,10 @@ void Platform::InitMinimal()
 	serialUSB.Start(NoPin);
 #endif
 	CanInterface::Init(GetCanAddress(), CANInstanceNumber, UseLaterCanPins, false);
+
+#if RPXXXX && SPICAN_CORE0_SERVICE
+	Core1Runtime::Start();											// CAN is serviced from core 0, so core 1 is ours
+#endif
 }
 
 void Platform::Spin()

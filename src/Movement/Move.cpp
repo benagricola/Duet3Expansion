@@ -2316,6 +2316,7 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 	return dms[drive].closedLoopControl.ProcessM569Point6(parser, reply);
 }
 
+TIME_CRITICAL
 void Move::PhaseStepControlLoop() noexcept
 {
 	// Record the control loop call interval

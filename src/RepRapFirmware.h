@@ -46,6 +46,18 @@ extern "C" void debugVprintf(const char *fmt, va_list vargs) noexcept;
 
 #define SPEED_CRITICAL	__attribute__((optimize("O2")))
 
+// Place a function in RAM so that its timing is independent of the XIP flash cache (which both cores
+// share; core 1 traffic evicts core 0's code, and the cache layout changes with every build).
+// On the RP2040 we leave code in flash instead: RAM there is needed for the firmware-update staging
+// buffer (see MaxFirmwareSize), and RP2040 boards do not run the timing-critical closed-loop control.
+#if RPXXXX && !PICO_RP2040
+# define TIME_CRITICAL			__attribute__((section(".time_critical")))
+# define TIME_CRITICAL_RODATA	__attribute__((section(".time_critical.rodata")))
+#else
+# define TIME_CRITICAL
+# define TIME_CRITICAL_RODATA
+#endif
+
 #if SAME5x || SAME70
 
 // Functions to set and clear data watchpoints

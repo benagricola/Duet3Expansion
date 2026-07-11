@@ -6,6 +6,7 @@
  */
 
 #include "Tasks.h"
+#include <Platform/Core1Runtime.h>
 #include <Platform/Platform.h>
 #include <Platform/TaskPriorities.h>
 #include <Movement/Move.h>
@@ -889,7 +890,11 @@ extern "C" uint64_t TaskResetRunTimeCounter() noexcept
 void Tasks::Diagnostics(const StringRef& reply) noexcept
 {
 	// Append a memory report to a string
-	reply.lcatf("Never used RAM %d, free system stack %d words\nTasks:", GetNeverUsedRam(), GetHandlerFreeStack()/4);
+	reply.lcatf("Never used RAM %d, free system stack %d words", GetNeverUsedRam(), GetHandlerFreeStack()/4);
+#if RPXXXX && SPICAN_CORE0_SERVICE
+	reply.lcatf("Core 1: %s, heartbeat %" PRIu32, (!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running", Core1Runtime::GetHeartbeat());
+#endif
+	reply.lcat("Tasks:");
 
 	// Now the per-task memory report
 	const uint64_t timeSinceLastCall = TaskResetRunTimeCounter();

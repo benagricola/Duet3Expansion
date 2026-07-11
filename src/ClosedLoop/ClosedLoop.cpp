@@ -110,6 +110,7 @@ void ClosedLoop::SetTargetToCurrentPosition() noexcept
 // The phase is normally in the range 0 to 4095 but when tuning it can be 0 to somewhat over 8192.
 // We must take it modulo 4096 when computing the currents. Function Trigonometry::FastSinCos does that.
 // 'magnitude' must be in range 0.0..1.0
+TIME_CRITICAL
 void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 {
 	desiredStepPhase = phase;
@@ -756,6 +757,7 @@ void ClosedLoop::AdjustTargetMotorSteps(float amount) noexcept
 	moveInstance->SetCurrentMotorSteps(driverNumber, lrintf(mParams.position));
 }
 
+TIME_CRITICAL
 void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept
 {
 	// Read the current state of the drive. Do this even if we are not in closed loop mode.

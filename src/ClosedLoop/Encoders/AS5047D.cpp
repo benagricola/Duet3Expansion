@@ -125,6 +125,7 @@ void AS5047D::Disable() noexcept
 }
 
 // This must set rawReading to a value between 0 and GetMaxValue()-1. Return true if successful, false if error.
+TIME_CRITICAL
 bool AS5047D::GetRawReading() noexcept
 {
 	if (spi.Select(0))			// get the mutex and set the clock rate

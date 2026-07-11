@@ -1160,6 +1160,7 @@ inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 	}
 }
 
+TIME_CRITICAL
 void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 {
 	// If we wrote a register, mark it up to date
@@ -1410,7 +1411,7 @@ static void TmcTimerCallback(CallbackParameter) noexcept
 }
 #endif
 
-extern "C" [[noreturn]] void TmcLoop(void *) noexcept
+extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 {
 #if !TMC_USES_SHARED_SPI
 	InitialiseDMA();
@@ -1907,6 +1908,7 @@ uint16_t SmartDrivers::GetMicrostepPosition(size_t driver) noexcept
 
 // Schedules a request to update the motor phases using XDIRECT register.
 // Returns true if request is scheduled. Will not schedule a request if it is equal to the current value.
+TIME_CRITICAL
 bool SmartDrivers::SetMotorPhases(size_t driver, uint32_t regVal) noexcept
 {
 	return driverStates[driver].SetXdirect(regVal);
