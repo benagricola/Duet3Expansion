@@ -107,6 +107,14 @@ constexpr uint32_t DriversSpiClockFrequency = 2000000;		// 2MHz SPI clock
 #if TMC_ON_CORE1
 static volatile bool stallWakePending = false;		// set by the core-1 loop, serviced by SmartDrivers::Spin on core 0
 #endif
+#ifdef MNB_USB_DIAG
+// Bench cycle timing, reported and reset by the USB 'L' command
+static volatile uint32_t benchCycleSumTicks = 0;
+static volatile uint32_t benchCycleMaxTicks = 0;
+static volatile uint32_t benchCycleMinTicks = 0xFFFFFFFF;
+static volatile uint32_t benchCycleCount2 = 0;
+static uint32_t benchLastCycleStart = 0;
+#endif
 static volatile uint32_t clCycleCount = 0;			// closed-loop/phase-step cycles completed since last read
 static volatile uint32_t clCycleOverruns = 0;		// of those, cycles that missed their wakeup deadline by at least half a period
 
@@ -1619,6 +1627,20 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 #endif
 # if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 		++clCycleCount;
+#  ifdef MNB_USB_DIAG
+		{
+			const uint32_t nowTicks = StepTimer::GetTimerTicks();
+			const uint32_t dt = nowTicks - benchLastCycleStart;
+			benchLastCycleStart = nowTicks;
+			if (dt < StepTimer::StepClockRate)					// ignore the first cycle and long pauses
+			{
+				benchCycleSumTicks += dt;
+				++benchCycleCount2;
+				if (dt > benchCycleMaxTicks) { benchCycleMaxTicks = dt; }
+				if (dt < benchCycleMinTicks) { benchCycleMinTicks = dt; }
+			}
+		}
+#  endif
 		// Do not reset lastWakeupTime here: the wakeup deadline sequence must advance by a fixed period per
 		// cycle (absolute pacing) so that the loop rate is work-independent. Resetting to "now" makes the
 		// period work+sleep; on boards where the iteration work is significant (about 75us on the RP2350
@@ -2214,6 +2236,28 @@ float SmartDrivers::GetDriverTemperature(size_t driver) noexcept
 #endif
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#ifdef MNB_USB_DIAG
+// Report and reset the bench cycle timing (USB 'L' command). Times in microseconds.
+void BenchLoopTimingReport(const StringRef& reply) noexcept
+{
+	const uint32_t n = benchCycleCount2;
+	if (n == 0)
+	{
+		reply.copy("LTIM no data");
+		return;
+	}
+	constexpr float TicksToUs = 1000000.0f/(float)StepTimer::StepClockRate;
+	reply.printf("LTIM n=%" PRIu32 " period=%.1f/%.1f/%.1f us (min/avg/max)",
+					n, (double)((float)benchCycleMinTicks * TicksToUs),
+					(double)(((float)benchCycleSumTicks/(float)n) * TicksToUs),
+					(double)((float)benchCycleMaxTicks * TicksToUs));
+	benchCycleSumTicks = 0;
+	benchCycleMaxTicks = 0;
+	benchCycleMinTicks = 0xFFFFFFFF;
+	benchCycleCount2 = 0;
+}
+#endif
+
 // Check periodically whether the closed-loop cycle is maintaining its intended rate, and raise a driver warning if not.
 // The V and A feedforward terms of the closed-loop controller scale with the cycle time, so a degraded rate changes the
 // controller balance and must not go unnoticed. Called regularly from the main loop; cheap when the check interval has not expired.

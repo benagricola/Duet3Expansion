@@ -91,6 +91,14 @@ public:
 
 	static void Init() noexcept;
 	static void Diagnostics(const StringRef& reply) noexcept;
+#if MNB_USB_DIAG
+	static void RunEncoderSelfTest(const StringRef& reply) noexcept;	// USB 'E' bench diagnostic
+	static void BenchTelemetryReport(const StringRef& reply) noexcept;	// USB 'F' bench command
+	static void BenchTelemetryReset() noexcept;							// USB 'Z' bench command
+	static void BenchLiveProbe(const StringRef& reply) noexcept;		// USB 'P' live snapshot
+	static void BenchCaptureArm() noexcept;							// USB 'A' arm per-cycle capture
+	static void BenchCaptureDump() noexcept;							// USB 'G' dump per-cycle capture
+#endif
 
 	// Functions run by tasks
 	[[noreturn]] void DataTransmissionTaskLoop() noexcept;

@@ -70,6 +70,12 @@
 #if RPXXXX
 # include <hardware/structs/watchdog.h>
 # include <hardware/structs/sysinfo.h>
+# if HAS_USB_SERIAL && MNB_USB_DIAG
+#  include <pico/bootrom.h>						// for rom_reboot(), used by the 'B' bench diagnostic
+#  include <boot/picoboot_constants.h>			// for the REBOOT2 flags, used by the 'B' bench diagnostic
+#  include <hardware/flash.h>					// for XIP_BASE, used by the 'N' bench diagnostic
+#  include <Hardware/NonVolatileMemory.h>		// for the 'N' bench diagnostic
+# endif
 # if NUM_SHARED_SPI > 0
 #  include<SPI.h>
 # endif
@@ -1146,6 +1152,9 @@ void Platform::Spin()
 		if (c == 'D')
 		{
 			debugPrintf("Version %s\n", VERSION);
+# if MNB_USB_DIAG
+			debugPrintf("Bench: 3.7 stack build 1 (PR series + USB diagnostics)\n");
+# endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
 			debugPrintf("%s\n", reply.c_str());
@@ -1172,6 +1181,136 @@ void Platform::Spin()
 			debugPrintf("Accelerometer detected: %s", AccelerometerHandler::IsPresent() ? "yes" : "no");
 # endif
 		}
+# if MNB_USB_DIAG
+# if SUPPORT_CLOSED_LOOP
+		else if (c == 'E')
+		{
+			// USB bench diagnostic: read the magnetic encoder (creates it on first use; no CAN/closed-loop config needed)
+			String<StringLength256> reply;
+			ClosedLoop::RunEncoderSelfTest(reply.GetRef());
+			debugPrintf("%s\n", reply.c_str());
+		}
+#  if RPXXXX && MNB_USB_DIAG
+		else if (c == 'F')
+		{
+			// USB bench diagnostic: report the bench telemetry accumulators (immune to M122 clear-on-read)
+			String<StringLength256> reply;
+			ClosedLoop::BenchTelemetryReport(reply.GetRef());
+			debugPrintf("%s\n", reply.c_str());
+		}
+		else if (c == 'Z')
+		{
+			// USB bench diagnostic: zero the bench telemetry accumulators to start a measurement window
+			ClosedLoop::BenchTelemetryReset();
+			debugPrintf("FTEL zeroed\n");
+		}
+		else if (c == 'P')
+		{
+			// USB bench diagnostic: live snapshot of the last control-loop cycle (poll for a trace)
+			String<StringLength256> reply;
+			ClosedLoop::BenchLiveProbe(reply.GetRef());
+			debugPrintf("%s\n", reply.c_str());
+		}
+		else if (c == 'A')
+		{
+			// USB bench diagnostic: arm the per-cycle capture (freezes 384 cycles after |err| > trigger)
+			ClosedLoop::BenchCaptureArm();
+			debugPrintf("CAP armed\n");
+		}
+		else if (c == 'G')
+		{
+			// USB bench diagnostic: dump the frozen per-cycle capture
+			ClosedLoop::BenchCaptureDump();
+		}
+		else if (c == 'L')
+		{
+			// USB bench diagnostic: TMC loop segment timing (avg/max us), resets on read
+			String<StringLength256> reply;
+			BenchLoopTimingReport(reply.GetRef());
+			debugPrintf("%s\n", reply.c_str());
+		}
+#  endif
+# endif
+# if HAS_SMART_DRIVERS
+		else if (c == 'T')
+		{
+			// USB bench diagnostic: dump TMC driver 0 status to confirm SPI reads/writes round-trip (DRV_STATUS + reads/writes/timeouts counts)
+			String<StringLength256> reply;
+			reply.copy("TMC driver 0:");
+			SmartDrivers::AppendDriverStatus(0, reply.GetRef());		// includes temp + VS for the TMC2240
+			debugPrintf("%s\n", reply.c_str());
+		}
+# endif
+# if RPXXXX
+		else if (c == 'B')
+		{
+			// USB bench diagnostic: reboot into the BOOTSEL bootloader so that new firmware can be copied
+			// over USB (the board re-enumerates as a mass storage device) without pressing the BOOTSEL button
+			debugPrintf("Rebooting into the BOOTSEL bootloader\n");
+			delay(100);													// give the USB stack time to send that before it disappears
+			// The ROM implements the reboot as a short delay on the watchdog hardware. Stop core 1 and
+			// disable interrupts before asking for it: vApplicationTickHook kicks the watchdog every
+			// millisecond, which otherwise interferes with the ROM's pending reboot (observed on the r1.5:
+			// the chip takes a plain reset into the firmware instead, and the BOOTSEL request is left
+			// pending and gets consumed by the *next* reset).
+			DisableCore1Processing();
+			IrqDisable();
+			hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);	// disarm the firmware's ~1s watchdog (WatchdogInit)
+			const int rc = rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL, 100, 0, 0);
+			if (rc == 0)
+			{
+				for (;;) { }											// quiet-wait for the delayed reboot, interrupts still off
+			}
+			// The ROM refused the reboot: restore normal running and report, rather than running into the
+			// undefined behaviour that follows reset_usb_boot()'s unreachable failure path
+			IrqEnable();
+			EnableCore1Processing();
+			debugPrintf("rom_reboot BOOTSEL failed, rc=%d\n", rc);
+		}
+		else if (c == 'R')
+		{
+			// USB bench diagnostic: restart the firmware, e.g. to verify NVM persistence without unplugging the board
+			debugPrintf("Resetting\n");
+			delay(100);													// give the USB stack time to send that before it disappears
+			ResetProcessor();
+		}
+		else if (c == 'N')
+		{
+			// USB bench diagnostic: check that closed-loop NVM page writes persist and land in the correct flash sector.
+			// Press 'N' (reports the stored state, then writes test values), 'R' to reset, then 'N' again: the report should
+			// now show calibration valid with zero phase 1234 and harmonic[0] 42.5, and the common page magic unchanged
+			// (0x41e5 if the common page has ever been written, else 0xffff - anything else means it was corrupted).
+			// The flash layout constants must match NonVolatileMemory.cpp, which keeps them private.
+			constexpr uint32_t NvmFlashSize = 2 * 1024 * 1024;
+			constexpr uint32_t NvmFlashSectorSize = 4096;
+			const uint16_t commonMagic = *reinterpret_cast<const uint16_t*>(XIP_BASE + NvmFlashSize - NvmFlashSectorSize);
+			const uint16_t closedLoopMagic = *reinterpret_cast<const uint16_t*>(XIP_BASE + NvmFlashSize - 2 * NvmFlashSectorSize);
+			NonVolatileMemory mem(NvmPage::closedLoop);
+			uint32_t phase;
+			bool backwards;
+			mem.GetClosedLoopZeroCountPhaseAndDirection(phase, backwards);
+			debugPrintf("NVM sector magics: common 0x%04x, closedLoop 0x%04x (expect 0x41e5/0x42e6, or 0xffff = never written)\n"
+						"closedLoop page: calibration valid %s, zero phase %" PRIu32 ", backwards %s, harmonic[0] %.3f\n",
+						commonMagic, closedLoopMagic,
+						(mem.GetClosedLoopCalibrationDataValid()) ? "yes" : "no", phase, (backwards) ? "yes" : "no",
+						(double)mem.GetClosedLoopHarmonicValues()[0].f);
+			mem.SetClosedLoopHarmonicValue(0, 42.5);
+			mem.SetClosedLoopZeroCountPhaseAndDirection(1234, false);
+			mem.EnsureWritten();
+			debugPrintf("Wrote test values (zero phase 1234, harmonic[0] 42.5); press 'R' to reset, then 'N' again to check they persisted\n");
+		}
+		else if (c == 'W')
+		{
+			// USB bench diagnostic: mark the closed-loop calibration data not valid again. The 'N' test above
+			// flags the page as holding valid calibration data, which the closed-loop code would otherwise
+			// try to load as a real calibration on the next M569.1.
+			NonVolatileMemory mem(NvmPage::closedLoop);
+			mem.SetClosedLoopCalibrationDataNotValid();
+			mem.EnsureWritten();
+			debugPrintf("Closed-loop calibration data marked not valid\n");
+		}
+# endif
+# endif
 	}
 #endif
 }

@@ -15,6 +15,10 @@
 #include "DriverMode.h"
 #include <atomic>
 
+#ifdef MNB_USB_DIAG
+void BenchLoopTimingReport(const StringRef& reply) noexcept;
+#endif
+
 namespace SmartDrivers
 {
 	void SetAxisNumber(size_t driver, uint32_t axisNumber) noexcept;

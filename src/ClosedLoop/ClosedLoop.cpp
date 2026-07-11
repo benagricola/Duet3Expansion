@@ -67,6 +67,36 @@ using std::numeric_limits;
 constexpr size_t DataCollectionTaskStackWords = 200;		// Size of the stack for the data collection task
 constexpr size_t EncoderCalibrationTaskStackWords = 500;	// Size of the stack for the encoder calibration task
 
+#if MNB_USB_DIAG
+// Bench telemetry accumulators, read via the USB 'F' command and reset only by the USB 'Z' command
+static uint32_t benchTelLoopCount = 0;
+static float benchTelMaxAbsPosErr = 0.0;
+static uint32_t benchTelResetMs = 0;
+// Live snapshot of the last control-loop cycle, for the USB 'P' probe (host polls for a live trace)
+static volatile float benchLiveTarget = 0.0;			// mParams.position (microsteps? trajectory units) as used by the loop
+static volatile float benchLiveTargetCounts = 0.0;		// target converted to encoder counts
+static volatile int32_t benchLiveEncCounts = 0;			// encoder current count
+static volatile float benchLiveErr = 0.0;				// currentPositionError (full steps)
+static volatile uint32_t benchLiveWhen = 0;				// step-clock timestamp of the snapshot
+
+// Triggered per-cycle capture ring: records every control-loop cycle, freezes 384 cycles after |err| exceeds the trigger.
+// Armed by USB 'A', dumped by USB 'G'.
+constexpr size_t BenchCapSize = 512;
+constexpr size_t BenchCapPostTrigger = 384;
+constexpr float BenchCapTriggerErr = 15.0;
+static uint32_t benchCapWhen[BenchCapSize];
+static float benchCapTarget[BenchCapSize];
+static int32_t benchCapEnc[BenchCapSize];
+static float benchCapErr[BenchCapSize];
+static float benchCapPid[BenchCapSize];
+static uint16_t benchCapPhase[BenchCapSize];
+static uint16_t benchCapMeasPhase[BenchCapSize];
+static float benchCapSpeed[BenchCapSize];
+static float benchCapITerm[BenchCapSize];
+static volatile uint32_t benchCapHead = 0;			// total cycles written (index = head % size)
+static volatile int32_t benchCapRemaining = -1;		// -1 idle, -2 armed, >0 post-trigger countdown, 0 done
+#endif
+
 SampleBuffer ClosedLoop::sampleBuffer;												// buffer for collecting samples - shared between all drives if we have more than one
 
 // Tasks and task loops
@@ -786,6 +816,13 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 
 		const float targetEncoderReading = rintf(mParams.position * encoder->GetCountsPerStep());
 		currentPositionError = (float)(targetEncoderReading - encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
+#if MNB_USB_DIAG
+		benchLiveTarget = mParams.position;
+		benchLiveTargetCounts = targetEncoderReading;
+		benchLiveEncCounts = encoder->GetCurrentCount();
+		benchLiveErr = currentPositionError;
+		benchLiveWhen = StepTimer::GetTimerTicks();
+#endif
 		errorDerivativeFilter.ProcessReading(currentPositionError, now);
 		speedFilter.ProcessReading(encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
 
@@ -855,6 +892,10 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 		TaskCriticalSectionLocker lock;						// prevent a race with the Heat task that sends the statistics
 
 		const float absPositionError = fabsf(currentPositionError);
+#if MNB_USB_DIAG
+		++benchTelLoopCount;
+		if (absPositionError > benchTelMaxAbsPosErr) { benchTelMaxAbsPosErr = absPositionError; }
+#endif
 		if (absPositionError > periodMaxAbsPositionError)
 		{
 			periodMaxAbsPositionError = absPositionError;
@@ -1056,6 +1097,30 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 			const uint16_t adjustedStepPhase = (uint16_t)((int16_t)measuredStepPhase + phaseFeedForward) % 4096u;
 			commandedStepPhase = (((PIDControlSignal < 0.0) ? (3 * 1024) : 1024) + adjustedStepPhase) % 4096u;
 			currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
+#if MNB_USB_DIAG
+			if (benchCapRemaining != 0 && benchCapRemaining != -1)
+			{
+				const size_t bci = benchCapHead % BenchCapSize;
+				benchCapWhen[bci] = StepTimer::GetTimerTicks();
+				benchCapTarget[bci] = mParams.position;
+				benchCapEnc[bci] = encoder->GetCurrentCount();
+				benchCapErr[bci] = currentPositionError;
+				benchCapPid[bci] = PIDControlSignal;
+				benchCapPhase[bci] = commandedStepPhase;
+				benchCapMeasPhase[bci] = (uint16_t)measuredStepPhase;
+				benchCapSpeed[bci] = mParams.speed;
+				benchCapITerm[bci] = PIDITerm;
+				benchCapHead = benchCapHead + 1;
+				if (benchCapRemaining == -2)
+				{
+					if (fabsf(currentPositionError) > BenchCapTriggerErr) { benchCapRemaining = BenchCapPostTrigger; }
+				}
+				else
+				{
+					benchCapRemaining = benchCapRemaining - 1;		// counts down to 0 = frozen
+				}
+			}
+#endif
 		}
 		else
 		{
@@ -1116,6 +1181,84 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	//DEBUG
 	//reply.catf(", event status 0x%08" PRIx32 ", TCC2 CTRLA 0x%08" PRIx32 ", TCC2 EVCTRL 0x%08" PRIx32, EVSYS->CHSTATUS.reg, QuadratureTcc->CTRLA.reg, QuadratureTcc->EVCTRL.reg);
 }
+
+#if MNB_USB_DIAG
+
+# if SUPPORT_CLOSED_LOOP
+// USB bench diagnostic: create (on first call) and read the magnetic encoder, then report its reading and status.
+// Works before any CAN/closed-loop configuration so a bare board can be validated over USB alone.
+/*static*/ void ClosedLoop::RunEncoderSelfTest(const StringRef& reply) noexcept
+{
+	static AbsoluteRotaryEncoder *testEncoder = nullptr;
+	if (testEncoder == nullptr)
+	{
+		testEncoder = CreateRotaryEncoder(MagneticEncoderType::as5047d, 200, Platform::GetSharedSpi(Encoder_SpiChannel), EncoderCsPin);
+		if (testEncoder == nullptr)
+		{
+			reply.cat("encoder self-test: failed to allocate encoder");
+			return;
+		}
+		(void)testEncoder->Init(reply);											// appends any init warnings/errors (e.g. magnet/comms problems) to reply
+	}
+	const bool ok = testEncoder->TakeReading();
+	reply.lcatf("encoder read %s, count=%ld, ", (ok) ? "OK" : "FAILED", (long)testEncoder->GetCurrentCount());
+	testEncoder->AppendDiagnostics(reply);										// reverse polarity, full rotations, last angle
+}
+
+// Report the bench telemetry accumulators as a single parse-friendly line (USB 'F' command)
+/*static*/ void ClosedLoop::BenchTelemetryReport(const StringRef& reply) noexcept
+{
+	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
+				millis() - benchTelResetMs, benchTelLoopCount, (double)benchTelMaxAbsPosErr);
+}
+
+// Arm the per-cycle capture ring (USB 'A' command)
+/*static*/ void ClosedLoop::BenchCaptureArm() noexcept
+{
+	benchCapRemaining = -1;			// stop any capture in progress
+	benchCapHead = 0;
+	benchCapRemaining = -2;			// armed
+}
+
+// Dump the per-cycle capture ring (USB 'G' command). Runs in the main task, not the control loop.
+/*static*/ void ClosedLoop::BenchCaptureDump() noexcept
+{
+	if (benchCapRemaining != 0)
+	{
+		debugPrintf("CAP state=%ld head=%lu (not frozen)\n", (long)benchCapRemaining, (unsigned long)benchCapHead);
+		return;
+	}
+	const uint32_t head = benchCapHead;
+	const size_t n = min<size_t>(head, BenchCapSize);
+	debugPrintf("CAP begin n=%u trigger at index %u from end\n", (unsigned)n, (unsigned)BenchCapPostTrigger);
+	for (size_t i = 0; i < n; ++i)
+	{
+		const size_t bci = (head - n + i) % BenchCapSize;
+		debugPrintf("C%u t=%" PRIu32 " tg=%.3f enc=%" PRIi32 " err=%.2f pid=%.1f ph=%u mph=%u spd=%.5f it=%.1f\n",
+					(unsigned)i, benchCapWhen[bci], (double)benchCapTarget[bci], benchCapEnc[bci], (double)benchCapErr[bci],
+					(double)benchCapPid[bci], benchCapPhase[bci], benchCapMeasPhase[bci], (double)benchCapSpeed[bci], (double)benchCapITerm[bci]);
+		delay(2);		// pace the dump so the USB CDC buffer never overruns
+	}
+	debugPrintf("CAP end\n");
+}
+
+// Report a live snapshot of the last control-loop cycle (USB 'P' command)
+/*static*/ void ClosedLoop::BenchLiveProbe(const StringRef& reply) noexcept
+{
+	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
+				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);
+}
+
+// Zero the bench telemetry accumulators (USB 'Z' command)
+/*static*/ void ClosedLoop::BenchTelemetryReset() noexcept
+{
+	benchTelLoopCount = 0;
+	benchTelMaxAbsPosErr = 0.0;
+	benchTelResetMs = millis();
+}
+# endif	// SUPPORT_CLOSED_LOOP
+
+#endif	// MNB_USB_DIAG
 
 /*static*/ void ClosedLoop::Diagnostics(const StringRef& reply) noexcept
 {
