@@ -17,6 +17,10 @@
 
 namespace SmartDrivers
 {
+	void SetAxisNumber(size_t driver, uint32_t axisNumber) noexcept;
+	uint32_t GetAxisNumber(size_t drive) noexcept;
+	const char *CheckStallDetectionEnabled(size_t driver, float speed) noexcept;
+
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	void PollClosedLoopCycleRate() noexcept;
 #endif
