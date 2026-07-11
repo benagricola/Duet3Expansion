@@ -31,12 +31,6 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 #  include <hri_sercom_c21.h>
 # endif
 
-#elif SAME70
-
-# include <pmc/pmc.h>
-# include <xdmac/xdmac.h>
-# define TMC_USES_SERCOM	0
-
 #endif
 
 #include <CAN/CanInterface.h>
@@ -46,10 +40,6 @@ static inline Move& GetMoveInstance() noexcept { return *moveInstance; }
 # ifndef TMC_USES_SERCOM
 #  define TMC_USES_SERCOM	0
 # endif
-#endif
-
-#ifndef __nocache
-# define __nocache				// only the SAME70 needs DMA buffers in non-cached memory
 #endif
 
 static constexpr uint32_t StepClockRate = StepTimer::StepClockRate;
@@ -1133,7 +1123,7 @@ void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 	}
 
 	sendDataBlock[0] = (regIndexRequested == ReadSpecial) ? specialReadRegisterNumber : ReadRegNumbers[regIndexRequested];
-#if SAME70 || SAMC21 || RP2040
+#if SAMC21 || RP2040
 	sendDataBlock[1] = 0;
 	sendDataBlock[2] = 0;
 	sendDataBlock[3] = 0;
@@ -1144,7 +1134,6 @@ void TmcDriverState::GetSpiReadCommand(uint8_t *sendDataBlock) noexcept
 	regIndexJustRequested = regIndexRequested;
 }
 
-// In the following, on the SAME70 only byte accesses to sendDataBlock are allowed, because accesses to non-cacheable memory must be aligned
 // Inline because it is only called from one place
 inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 {
@@ -1163,7 +1152,7 @@ inline void TmcDriverState::GetSpiCommand(uint8_t *sendDataBlock) noexcept
 		const size_t regNum = LowestSetBit(locRegistersToUpdate);
 		regIndexBeingUpdated = regNum;
 		sendDataBlock[0] = ((regNum == WriteSpecial) ? specialWriteRegisterNumber : WriteRegNumbers[regNum]) | 0x80;
-#if SAME70 || SAMC21 || RP2040
+#if SAMC21 || RP2040
 		StoreBEU32(sendDataBlock + 1, writeRegisters[regNum]);
 #else
 		*reinterpret_cast<uint32_t*>(sendDataBlock + 1) = __builtin_bswap32(writeRegisters[regNum]);
@@ -1187,7 +1176,7 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 	if (previousRegIndexRequested <= NumReadRegisters)
 	{
 		++numReads;
-#if SAME70 || SAMC21 || RP2040
+#if SAMC21 || RP2040
 		uint32_t regVal = LoadBEU32(rcvDataBlock + 1);
 #else
 		uint32_t regVal = __builtin_bswap32(*reinterpret_cast<const uint32_t*>(rcvDataBlock + 1));
@@ -1273,19 +1262,18 @@ static TmcDriverState driverStates[numTmcDrivers];
 // TMC management task
 static Task<TmcTaskStackWords> tmcTask;
 
-// Declare the DMA buffers with the __nocache attribute for the SAME70. Access to these must be aligned.
 // We no longer declare them static, in order that the addresses get included in the linker map file.
 const size_t SpiDataSize = 5 * numTmcDrivers;				// number of bytes in the SPI transfer to/from the TMC driver chain
-__nocache volatile uint8_t tmcSendData[SpiDataSize];		// used to prepare regular read/write requests via SPI
-__nocache volatile uint8_t tmcRcvData[SpiDataSize];
+static volatile uint8_t tmcSendData[SpiDataSize];		// used to prepare regular read/write requests via SPI
+static volatile uint8_t tmcRcvData[SpiDataSize];
 
 #if TMC_USES_SHARED_SPI
 static SharedSpiClient *spiDevice;
 #endif
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
-__nocache volatile uint8_t tmcPhaseSendData[SpiDataSize];	// used to send specific phase data
-__nocache volatile uint8_t tmcAltRcvData[SpiDataSize];
+static volatile uint8_t tmcPhaseSendData[SpiDataSize];	// used to send specific phase data
+static volatile uint8_t tmcAltRcvData[SpiDataSize];
 
 static uint32_t lastWakeupTime = 0;
 static StepTimer tmcTimer;
@@ -1320,213 +1308,60 @@ inline bool TmcDriverState::SetXdirect(uint32_t regVal) noexcept
 #if !TMC_USES_SHARED_SPI
 static void InitialiseDMA() noexcept
 {
-#if SAME70
-	/* From the data sheet:
-	 * Single Block Transfer With Single Microblock
-		1. Read the XDMAC Global Channel Status Register (XDMAC_GS) to select a free channel. [we use fixed channel numbers instead.]
-		2. Clear the pending Interrupt Status bit(s) by reading the selected XDMAC Channel x Interrupt Status
-		Register (XDMAC_CISx).
-		3. Write the XDMAC Channel x Source Address Register (XDMAC_CSAx) for channel x.
-		4. Write the XDMAC Channel x Destination Address Register (XDMAC_CDAx) for channel x.
-		5. Program field UBLEN in the XDMAC Channel x Microblock Control Register (XDMAC_CUBCx) with
-		the number of data.
-		6. Program the XDMAC Channel x Configuration Register (XDMAC_CCx):
-		6.1. Clear XDMAC_CCx.TYPE for a memory-to-memory transfer, otherwise set this bit.
-		6.2. Configure XDMAC_CCx.MBSIZE to the memory burst size used.
-		6.3. Configure XDMAC_CCx.SAM and DAM to Memory Addressing mode.
-		6.4. Configure XDMAC_CCx.DSYNC to select the peripheral transfer direction.
-		6.5. Configure XDMAC_CCx.CSIZE to configure the channel chunk size (only relevant for
-		peripheral synchronized transfer).
-		6.6. Configure XDMAC_CCx.DWIDTH to configure the transfer data width.
-		6.7. Configure XDMAC_CCx.SIF, XDMAC_CCx.DIF to configure the master interface used to
-		read data and write data, respectively.
-		6.8. Configure XDMAC_CCx.PERID to select the active hardware request line (only relevant for
-		a peripheral synchronized transfer).
-		6.9. Set XDMAC_CCx.SWREQ to use a software request (only relevant for a peripheral
-		synchronized transfer).
-		7. Clear the following five registers:
-		– XDMAC Channel x Next Descriptor Control Register (XDMAC_CNDCx)
-		– XDMAC Channel x Block Control Register (XDMAC_CBCx)
-		– XDMAC Channel x Data Stride Memory Set Pattern Register (XDMAC_CDS_MSPx)
-		– XDMAC Channel x Source Microblock Stride Register (XDMAC_CSUSx)
-		– XDMAC Channel x Destination Microblock Stride Register (XDMAC_CDUSx)
-		This indicates that the linked list is disabled, there is only one block and striding is disabled.
-		8. Enable the Microblock interrupt by writing a ‘1’ to bit BIE in the XDMAC Channel x Interrupt Enable
-		Register (XDMAC_CIEx). Enable the Channel x Interrupt Enable bit by writing a ‘1’ to bit IEx in the
-		XDMAC Global Interrupt Enable Register (XDMAC_GIE).
-		9. Enable channel x by writing a ‘1’ to bit ENx in the XDMAC Global Channel Enable Register
-		(XDMAC_GE). XDMAC_GS.STx (XDMAC Channel x Status bit) is set by hardware.
-		10. Once completed, the DMA channel sets XDMAC_CISx.BIS (End of Block Interrupt Status bit) and
-		generates an interrupt. XDMAC_GS.STx is cleared by hardware. The software can either wait for
-		an interrupt or poll the channel status bit.
-
-		The following code is adapted from the code in the HSMCI driver instead.
-	*/
-
-	// Receive
-	{
-		xdmac_channel_disable(XDMAC, DmacChanTmcRx);
-		xdmac_channel_config_t p_cfg = {0, 0, 0, 0, 0, 0, 0, 0};
-		p_cfg.mbr_cfg = XDMAC_CC_TYPE_PER_TRAN
-						| XDMAC_CC_MBSIZE_SINGLE
-						| XDMAC_CC_DSYNC_PER2MEM
-						| XDMAC_CC_CSIZE_CHK_1
-						| XDMAC_CC_DWIDTH_BYTE
-						| XDMAC_CC_SIF_AHB_IF1
-						| XDMAC_CC_DIF_AHB_IF0
-						| XDMAC_CC_SAM_FIXED_AM
-						| XDMAC_CC_DAM_INCREMENTED_AM
-						| XDMAC_CC_PERID(TMC_DmaRxPerid);
-		p_cfg.mbr_ubc = SpiDataSize;
-		p_cfg.mbr_sa = reinterpret_cast<uint32_t>(&(USART_TMC->US_RHR));
-		xdmac_configure_transfer(XDMAC, DmacChanTmcRx, &p_cfg);
-	}
-
-	// Transmit
-	{
-		xdmac_channel_disable(XDMAC, DmacChanTmcTx);
-		xdmac_channel_config_t p_cfg = {0, 0, 0, 0, 0, 0, 0, 0};
-		p_cfg.mbr_cfg = XDMAC_CC_TYPE_PER_TRAN
-						| XDMAC_CC_MBSIZE_SINGLE
-						| XDMAC_CC_DSYNC_MEM2PER
-						| XDMAC_CC_CSIZE_CHK_1
-						| XDMAC_CC_DWIDTH_BYTE
-						| XDMAC_CC_SIF_AHB_IF0
-						| XDMAC_CC_DIF_AHB_IF1
-						| XDMAC_CC_SAM_INCREMENTED_AM
-						| XDMAC_CC_DAM_FIXED_AM
-						| XDMAC_CC_PERID(TMC_DmaTxPerid);
-		p_cfg.mbr_ubc = SpiDataSize;
-		p_cfg.mbr_da = reinterpret_cast<uint32_t>(&(USART_TMC->US_THR));
-		xdmac_configure_transfer(XDMAC, DmacChanTmcTx, &p_cfg);
-	}
-#endif
+	// Nothing needed here: the SERCOM DMA descriptors are set up in SmartDrivers::Init
 }
 
 // Set up the PDC or DMAC to send a register and receive the status, but don't enable it yet
 static void SetupDMA(const volatile uint8_t *txData, const volatile uint8_t *rxData) noexcept
 {
-#if SAME70
-	// Receive
-	{
-		xdmac_channel_disable(XDMAC, DmacChanTmcRx);
-		uint32_t mbr_da = reinterpret_cast<uint32_t>(rxData);
-		xdmac_channel_get_interrupt_status(XDMAC, DmacChanTmcRx);
-		xdmac_channel_set_destination_addr(XDMAC, DmacChanTmcRx, mbr_da);
-	}
-
-	// Transmit
-	{
-		xdmac_channel_disable(XDMAC, DmacChanTmcTx);
-		uint32_t mbr_sa = reinterpret_cast<uint32_t>(txData);
-		xdmac_channel_get_interrupt_status(XDMAC, DmacChanTmcRx);
-		xdmac_channel_set_source_addr(XDMAC, DmacChanTmcTx, mbr_sa);
-	}
-
-#elif SAME5x || SAMC21
 	DmacManager::DisableChannel(DmacChanTmcRx);
 	DmacManager::DisableChannel(DmacChanTmcTx);
 	DmacManager::SetSourceAddress(DmacChanTmcTx, (void*)txData);
 	DmacManager::SetDataLength(DmacChanTmcTx, SpiDataSize);
 	DmacManager::SetDestinationAddress(DmacChanTmcRx, (void*)rxData);
 	DmacManager::SetDataLength(DmacChanTmcRx, SpiDataSize);
-#else
-	spiPdc->PERIPH_PTCR = (PERIPH_PTCR_RXTDIS | PERIPH_PTCR_TXTDIS);		// disable the PDC
-
-	spiPdc->PERIPH_TPR = reinterpret_cast<uint32_t>(txData);
-	spiPdc->PERIPH_TCR = SpiDataSize;
-
-	spiPdc->PERIPH_RPR = reinterpret_cast<uint32_t>(rxData);
-	spiPdc->PERIPH_RCR = SpiDataSize;
-#endif
 }
 
 static inline void EnableDma() noexcept
 {
-#if SAME70
-	xdmac_channel_enable(XDMAC, DmacChanTmcRx);
-	xdmac_channel_enable(XDMAC, DmacChanTmcTx);
-#elif SAME5x || SAMC21
 	DmacManager::EnableChannel(DmacChanTmcRx, DmacPrioTmcRx);
 	DmacManager::EnableChannel(DmacChanTmcTx, DmacPrioTmcTx);
-#else
-	spiPdc->PERIPH_PTCR = (PERIPH_PTCR_RXTEN | PERIPH_PTCR_TXTEN);			// enable the PDC
-#endif
 }
 
 static inline void DisableDma() noexcept
 {
-#if SAME70
-	xdmac_channel_disable(XDMAC, DmacChanTmcTx);
-	xdmac_channel_disable(XDMAC, DmacChanTmcRx);
-#elif SAME5x || SAMC21
 	DmacManager::DisableChannel(DmacChanTmcTx);
 	DmacManager::DisableChannel(DmacChanTmcRx);
-#else
-	spiPdc->PERIPH_PTCR = (PERIPH_PTCR_RXTDIS | PERIPH_PTCR_TXTDIS);		// disable the PDC
-#endif
 }
 
 static inline void ResetSpi() noexcept
 {
-#if TMC_USES_SERCOM
 	SERCOM_TMC->SPI.CTRLA.bit.ENABLE = 0;			// warning: this makes SCLK float!
 	while (SERCOM_TMC->SPI.SYNCBUSY.bit.ENABLE) { }
-#elif TMC_USES_USART
-	USART_TMC->US_CR = US_CR_RSTRX | US_CR_RSTTX;	// reset transmitter and receiver
-#else
-	SPI_TMC->SPI_CR = SPI_CR_SPIDIS;				// disable the SPI
-	(void)SPI_TMC->SPI_RDR;							// clear the receive buffer
-#endif
 }
 
 static inline void EnableSpi() noexcept
 {
-#if TMC_USES_SERCOM
 	SERCOM_TMC->SPI.CTRLB.bit.RXEN = 1;
 	while (SERCOM_TMC->SPI.SYNCBUSY.bit.CTRLB) { }
 	SERCOM_TMC->SPI.CTRLA.bit.ENABLE = 1;
 	while (SERCOM_TMC->SPI.SYNCBUSY.bit.ENABLE) { }
-#elif TMC_USES_USART
-	USART_TMC->US_CR = US_CR_RXEN | US_CR_TXEN;		// enable transmitter and receiver
-#else
-	SPI_TMC->SPI_CR = SPI_CR_SPIEN;					// enable SPI
-#endif
 }
 
 static inline void DisableEndOfTransferInterrupt() noexcept
 {
-#if SAME70
-	xdmac_channel_disable_interrupt(XDMAC, DmacChanTmcRx, XDMAC_CIE_BIE);
-#elif TMC_USES_SERCOM
 	DmacManager::DisableCompletedInterrupt(DmacChanTmcRx);
-#elif TMC_USES_USART
-	USART_TMC->US_IDR = US_IDR_ENDRX;				// enable end-of-transfer interrupt
-#else
-	SPI_TMC->SPI_IDR = SPI_IDR_ENDRX;				// enable end-of-transfer interrupt
-#endif
 }
 
 static inline void EnableEndOfTransferInterrupt() noexcept
 {
-#if SAME70
-	xdmac_channel_enable_interrupt(XDMAC, DmacChanTmcRx, XDMAC_CIE_BIE);
-#elif TMC_USES_SERCOM
 	DmacManager::EnableCompletedInterrupt(DmacChanTmcRx);
-#elif TMC_USES_USART
-	USART_TMC->US_IER = US_IER_ENDRX;				// enable end-of-transfer interrupt
-#else
-	SPI_TMC->SPI_IER = SPI_IER_ENDRX;				// enable end-of-transfer interrupt
-#endif
 }
 
 // DMA complete callback
 void RxDmaCompleteCallback(CallbackParameter param, DmaCallbackReason reason) noexcept
 {
 	fastDigitalWriteHigh(GlobalTmcCSPin);			// set CS high
-#if SAME70
-	DisableEndOfTransferInterrupt();
-#endif
 	dmaFinishedReason = reason;
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	// When in phase stepping or closed loop mode we send the coil currents if any have changes since last time we sent them.
@@ -1877,11 +1712,7 @@ void SmartDrivers::Init() noexcept
 	SetPinFunction(TMCSclkPin, TMCSclkPinPeriphMode);
 
 	// Enable the clock to the USART or SPI
-#if SAME5x || SAMC21
 	Serial::EnableSercomClock(TmcSercomNumber);
-#else
-	pmc_enable_periph_clk(ID_TMC_SPI);
-#endif
 
 #if TMC_USES_SERCOM
 	// Set up the SERCOM
@@ -1909,11 +1740,7 @@ void SmartDrivers::Init() noexcept
 # if !SAMC21
 	hri_sercomspi_write_CTRLC_reg(SERCOM_TMC, regCtrlC);
 # endif
-#if SAME70
-	hri_sercomspi_write_BAUD_reg(SERCOM_TMC, SERCOM_SPI_BAUD_BAUD(SystemPeripheralClock/(2 * DriversSpiClockFrequency) - 1));
-#else
 	hri_sercomspi_write_BAUD_reg(SERCOM_TMC, SERCOM_SPI_BAUD_BAUD(Serial::SercomFastGclkFreq/(2 * DriversSpiClockFrequency) - 1));
-#endif
 	hri_sercomspi_write_DBGCTRL_reg(SERCOM_TMC, SERCOM_I2CM_DBGCTRL_DBGSTOP);			// baud rate generator is stopped when CPU halted by debugger
 
 	// Set up the DMA descriptors
@@ -1932,38 +1759,6 @@ void SmartDrivers::Init() noexcept
 
 	SERCOM_TMC->SPI.CTRLA.bit.ENABLE = 1;		// keep the SPI enabled all the time so that the SPCLK line is driven
 
-#elif TMC_USES_USART
-	// Set USART_EXT_DRV in SPI mode, with data changing on the falling edge of the clock and captured on the rising edge
-	USART_TMC->US_IDR = ~0u;
-	USART_TMC->US_CR = US_CR_RSTRX | US_CR_RSTTX | US_CR_RXDIS | US_CR_TXDIS;
-	USART_TMC->US_MR = US_MR_USART_MODE_SPI_MASTER
-					| US_MR_USCLKS_MCK
-					| US_MR_CHRL_8_BIT
-					| US_MR_CHMODE_NORMAL
-					| US_MR_CPOL
-					| US_MR_CLKO;
-	USART_TMC->US_BRGR = SystemPeripheralClock()/DriversSpiClockFrequency;		// set SPI clock frequency
-	USART_TMC->US_CR = US_CR_RSTRX | US_CR_RSTTX | US_CR_RXDIS | US_CR_TXDIS | US_CR_RSTSTA;
-
-	// We need a few microseconds of delay here for the USART to sort itself out before we send any data,
-	// otherwise the processor generates two short reset pulses on its own NRST pin, and resets itself.
-	// 2016-07-07: removed this delay, because we no longer send commands to the TMC2660 drivers immediately.
-	//delay(10);
-#else
-	// Set up the SPI interface with data changing on the falling edge of the clock and captured on the rising edge
-	spi_reset(SPI_TMC);										// this clears the transmit and receive registers and puts the SPI into slave mode
-	SPI_TMC->SPI_MR = SPI_MR_MSTR							// master mode
-					| SPI_MR_MODFDIS							// disable fault detection
-					| SPI_MR_PCS(0);							// fixed peripheral select
-
-	// Set SPI mode, clock frequency, CS active after transfer, delay between transfers
-	const uint16_t baud_div = (uint16_t)spi_calc_baudrate_div(DriversSpiClockFrequency, SystemCoreClock);
-	const uint32_t csr = SPI_CSR_SCBR(baud_div)					// Baud rate
-					| SPI_CSR_BITS_8_BIT						// Transfer bit width
-					| SPI_CSR_DLYBCT(0)      					// Transfer delay
-					| SPI_CSR_CSAAT								// Keep CS low after transfer in case we are slow in writing the next byte
-					| SPI_CSR_CPOL;								// clock high between transfers
-	SPI_TMC->SPI_CSR[0] = csr;
 #endif
 #endif	// TMC_USES_SHARED_SPI
 
@@ -1973,12 +1768,6 @@ void SmartDrivers::Init() noexcept
 		driverStates[driver].Init(driver);
 	}
 
-#if SAME70
-	xdmac_channel_disable_interrupt(XDMAC, DmacChanTmcRx, 0xFFFFFFFF);
-	DmacManager::SetInterruptCallback(DmacChanTmcRx, RxDmaCompleteCallback, CallbackParameter());				// set up DMA receive complete callback
-	xdmac_enable_interrupt(XDMAC, DmacChanTmcRx);
-#endif
-
 	driversState = DriversState::noPower;
 		tmcTask.Create(TmcLoop, "TMC", nullptr, TaskPriority::TmcOpenLoop);
 }
@@ -1987,9 +1776,6 @@ void SmartDrivers::Init() noexcept
 void SmartDrivers::Exit() noexcept
 {
 	digitalWrite(GlobalTmcEnablePin, true);					// disable the drivers
-#if !TMC_USES_SERCOM && !TMC_USES_SHARED_SPI
-	NVIC_DisableIRQ(TMC_SPI_IRQn);
-#endif
 	tmcTask.TerminateAndUnlink();
 	driversState = DriversState::shutDown;						// prevent Spin() calls from doing anything
 }
