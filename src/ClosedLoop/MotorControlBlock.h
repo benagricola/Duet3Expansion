@@ -172,6 +172,15 @@ struct MotorControlBlock
 	volatile uint32_t stepsEmitted = 0;							// step pulses generated
 	volatile uint32_t stepPollMask = 0;							// the driversCurrentlyUsed mask at the last pulse (diagnostic)
 	volatile uint8_t stepTestRequest = 0;						// bench: 1 = core 0 asks the kernel to emit 3200 wide test pulses on stepPollMask; kernel sets 2 when done
+	volatile uint32_t stepTestCtrlWritten = 0;					// bench: the pin mask the kernel test pulsed
+	volatile uint32_t stepTestCtrlReadback = 0;					// bench: IO_BANK0 CTRL read back during the test (proves fabric read/write from core 1)
+	volatile uint32_t stepTestStatusHigh = 0;					// bench: IO_BANK0 STATUS during the high phase (OUTTOPAD bit 9 = what the pad is told to drive)
+	volatile uint32_t stepTestSioReadback = 0;					// bench: SIO gpio_out read back after a gpio_set of the mask
+	volatile uint32_t stepGapMinTicks = 0;						// bench: smallest gap between consecutive emitted steps, in step-timer ticks (reset by BenchTelemetryReset)
+	volatile uint32_t stepGapMaxTicks = 0;						// bench: largest gap between consecutive emitted steps (proves the poll paces steps without bursts or stalls)
+	volatile uint32_t stepLastTicks = 0;						// bench: tick time of the last emitted step; 0 = no step since reset
+	volatile uint32_t stepsDirHigh = 0;							// bench: steps emitted while the physical DIR pin read back high (reset by BenchTelemetryReset)
+	volatile uint32_t stepsDirLow = 0;							// bench: steps emitted while the physical DIR pin read back low - a ~50/50 split on a one-way move means the commanded direction is alternating
 
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel

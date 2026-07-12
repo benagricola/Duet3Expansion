@@ -21,6 +21,8 @@
 
 #include <Movement/StepTimer.h>
 #include <hardware/structs/sio.h>
+#include <hardware/structs/io_bank0.h>
+#include <hardware/regs/io_bank0.h>
 #include "Trigonometry.h"
 #include "DerivativeAveragingFilter.h"
 #include "Encoders/Encoder.h"
@@ -269,15 +271,33 @@ namespace MotorControl
 	{
 		if (motorBlock.stepTestRequest == 1)
 		{
-			// Bench diagnostic: emit wide test pulses from THIS core so cross-core GPIO problems can
-			// be discriminated from step-generation problems (mirrors the core-0 'S' test)
+			// Bench diagnostic: emit test pulses from THIS core via the SIO GPIO registers (the same
+			// mechanism the ISR stepping path uses from core 0) so cross-core GPIO problems can be
+			// discriminated from step-generation problems. Earlier "core-1 SIO doesn't reach the
+			// pads" conclusions were artifacts: MSCNT deltas alias to zero for x16 pulse counts that
+			// are multiples of 64, and the G1-path pulses were too narrow for the TMC's filtered
+			// STEP input. Read back CTRL/STATUS/SIO so core 0 can report write delivery regardless.
 			const uint32_t mask = motorBlock.stepPollMask;
-			for (unsigned int n = 0; n < 3200; ++n)
+			unsigned int pin = 0;
+			while (pin < 31 && (mask & (1u << pin)) == 0) { ++pin; }
+			// 500us high/low paced by the step timer: slow enough for the rotor to physically follow,
+			// so the encoder read between tests gives ground truth (MSCNT proved unreliable at speed)
+			constexpr uint32_t halfPeriodTicks = (uint64_t)StepTimer::StepClockRate * 500 / 1000000;
+			for (unsigned int n = 0; n < 1600; ++n)
 			{
 				sio_hw->gpio_set = mask;
-				for (unsigned int i = 0; i < 1000; ++i) { __asm volatile("nop"); }
+				if (n == 0)
+				{
+					motorBlock.stepTestCtrlWritten = mask;
+					motorBlock.stepTestCtrlReadback = io_bank0_hw->io[pin].ctrl;
+					motorBlock.stepTestStatusHigh = io_bank0_hw->io[pin].status;
+					motorBlock.stepTestSioReadback = sio_hw->gpio_out;
+				}
+				uint32_t t0 = StepTimer::GetTimerTicks();
+				while (StepTimer::GetTimerTicks() - t0 < halfPeriodTicks) { }
 				sio_hw->gpio_clr = mask;
-				for (unsigned int i = 0; i < 1000; ++i) { __asm volatile("nop"); }
+				t0 = StepTimer::GetTimerTicks();
+				while (StepTimer::GetTimerTicks() - t0 < halfPeriodTicks) { }
 			}
 			motorBlock.stepTestRequest = 2;
 		}

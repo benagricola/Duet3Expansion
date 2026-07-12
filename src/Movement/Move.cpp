@@ -2372,15 +2372,14 @@ TIME_CRITICAL void Move::StepPollOnCore1() noexcept
 			if (dms[0].state >= DMState::firstMotionState
 				&& (int32_t)(dms[0].nextStepTime - StepTimer::GetMovementTimerTicks()) <= (int32_t)MoveTiming::MinInterruptInterval)
 			{
+				const uint32_t stepStartTicks = StepTimer::GetTimerTicks();
 				StepDriversHigh(dms[0].driversCurrentlyUsed);								// generate the step
 				PrepareForNextSteps(now);
-				// Pad the step pulse to at least ~1us. In the ISR path the interrupt overhead does
-				// this implicitly, but here a cache-hot PrepareForNextSteps can complete in ~200ns,
-				// which the TMC2240's filtered STEP input (GCONF multistep_filt) does not register.
-				for (unsigned int i = 0; i < 200; ++i)
-				{
-					__asm volatile("nop");
-				}
+				// Hold the step pulse high for at least 2 full timer ticks (>2us): the TMC2240's
+				// filtered STEP input (GCONF multistep_filt) drops narrower pulses, and in the ISR
+				// path the interrupt overhead provides this width implicitly while a cache-hot
+				// PrepareForNextSteps here can complete in ~200ns
+				while (StepTimer::GetTimerTicks() - stepStartTicks < 3) { }
 				StepDriversLow();															// set the step pin low
 				if (dms[0].directionChanged)
 				{
@@ -2390,6 +2389,17 @@ TIME_CRITICAL void Move::StepPollOnCore1() noexcept
 				motorBlock.stepsEmitted = motorBlock.stepsEmitted + 1;
 				motorBlock.stepPollMask = dms[0].driversCurrentlyUsed;					// diagnostic: the pin mask actually pulsed
 				motorBlock.motorPosition = dms[0].currentMotorPosition;					// the openLoopStep position output the design doc specifies
+				// Bench: track the min/max spacing of emitted steps so mis-pacing (bursts or stalls
+				// in emission) can be told apart from mechanical stalls when the rotor stops
+				if (motorBlock.stepLastTicks != 0)
+				{
+					const uint32_t gap = stepStartTicks - motorBlock.stepLastTicks;
+					if (motorBlock.stepGapMinTicks == 0 || gap < motorBlock.stepGapMinTicks) { motorBlock.stepGapMinTicks = gap; }
+					if (gap > motorBlock.stepGapMaxTicks) { motorBlock.stepGapMaxTicks = gap; }
+				}
+				motorBlock.stepLastTicks = stepStartTicks;
+				if ((sio_hw->gpio_in >> (DirectionPins[0] & 31)) & 1) { motorBlock.stepsDirHigh = motorBlock.stepsDirHigh + 1; }
+				else { motorBlock.stepsDirLow = motorBlock.stepsDirLow + 1; }
 			}
 		}
 	}

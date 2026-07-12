@@ -70,6 +70,8 @@
 #if RPXXXX
 # include <hardware/structs/watchdog.h>
 # include <hardware/structs/sysinfo.h>
+# include <hardware/structs/io_bank0.h>			// pad overrides, used by the 'S' bench steptest
+# include <hardware/regs/io_bank0.h>
 # if HAS_USB_SERIAL && MNB_USB_DIAG
 #  include <pico/bootrom.h>						// for rom_reboot(), used by the 'B' bench diagnostic
 #  include <boot/picoboot_constants.h>			// for the REBOOT2 flags, used by the 'B' bench diagnostic
@@ -1163,7 +1165,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v30 core1 steptest\n");
+			debugPrintf("Bench: v40 staging3 final\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
@@ -1228,28 +1230,53 @@ void Platform::Spin()
 			motorBlock.stepPollMask = 1u << (StepPins[0] & 31);
 			motorBlock.stepTestRequest = 1;
 			const uint32_t t0 = millis();
-			while (motorBlock.stepTestRequest != 2 && millis() - t0 < 1000) { delay(1); }
+			while (motorBlock.stepTestRequest != 2 && millis() - t0 < 8000) { delay(1); }
 			delay(3);
 			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
-			debugPrintf("STEPTEST core1: done=%u, mspos %u -> %u\n", motorBlock.stepTestRequest, msposBefore, msposAfter);
+			debugPrintf("STEPTEST core1: done=%u, mspos %u -> %u, ctrl wrote 0x%" PRIx32 " read 0x%" PRIx32 ", status(high) 0x%" PRIx32 ", gpio_out(set) 0x%" PRIx32 "\n",
+						motorBlock.stepTestRequest, msposBefore, msposAfter,
+						motorBlock.stepTestCtrlWritten, motorBlock.stepTestCtrlReadback, motorBlock.stepTestStatusHigh, motorBlock.stepTestSioReadback);
 		}
 		else if (c == 'S')
 		{
-			// USB bench diagnostic: pulse the step pin 3200 times from THIS core (core 0) at ~10us
-			// spacing and report the TMC microstep counter before/after, to discriminate pin/chip
-			// problems from cross-core GPIO problems when steps go missing
-			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
+			// USB bench diagnostic: pulse the step pin 1600 times from THIS core (core 0) via SIO at
+			// 1kHz — slow enough for the rotor to physically follow, so the encoder (read externally
+			// between tests) gives ground truth on whether the TMC stepped. Half a rev at x16.
 			const uint32_t mask = 1u << (StepPins[0] & 31);
-			for (unsigned int i = 0; i < 3200; ++i)
+			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
+			for (unsigned int i = 0; i < 1600; ++i)
 			{
 				sio_hw->gpio_set = mask;
-				delayMicroseconds(5);
+				delayMicroseconds(500);
 				sio_hw->gpio_clr = mask;
-				delayMicroseconds(5);
+				delayMicroseconds(500);
 			}
 			delay(3);
 			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
-			debugPrintf("STEPTEST core0: 3200 pulses on mask 0x%" PRIx32 ", mspos %u -> %u\n", mask, msposBefore, msposAfter);
+			debugPrintf("STEPTEST core0 sio 1600@1kHz mask 0x%" PRIx32 ": mspos %u -> %u\n", mask, msposBefore, msposAfter);
+		}
+		else if (c == 'O')
+		{
+			// USB bench diagnostic: as 'S' but pulses via the IO_BANK0 OUTOVER pad override (the
+			// mechanism the core-1 step poll uses), still from core 0 — isolates the override
+			// mechanism from cross-core write-delivery questions
+			const uint32_t mask = 1u << (StepPins[0] & 31);
+			io_rw_32 *const ctrl = &io_bank0_hw->io[StepPins[0] & 31].ctrl;
+			const uint32_t ctrlBase = *ctrl & ~IO_BANK0_GPIO0_CTRL_OUTOVER_BITS;
+			const uint32_t ctrlHigh = ctrlBase | (IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_HIGH << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB);
+			const uint32_t ctrlLow = ctrlBase | (IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_LOW << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB);
+			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
+			for (unsigned int i = 0; i < 1600; ++i)
+			{
+				*ctrl = ctrlHigh;
+				delayMicroseconds(500);
+				*ctrl = ctrlLow;
+				delayMicroseconds(500);
+			}
+			*ctrl = ctrlBase;
+			delay(3);
+			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
+			debugPrintf("STEPTEST core0 outover 1600@1kHz mask 0x%" PRIx32 ": mspos %u -> %u\n", mask, msposBefore, msposAfter);
 		}
 		else if (c == 'A')
 		{

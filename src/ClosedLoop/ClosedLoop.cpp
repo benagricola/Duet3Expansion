@@ -1516,12 +1516,14 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	// XDIRECT staging state so a break anywhere in the coil-current path is visible.
 	uint32_t xdFrames, xdPhase, gconf;
 	SmartDrivers::GetBenchXdirectDiag(xdFrames, xdPhase, gconf);
-	reply.printf("PLIVE mode=%u enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32 " poll=%" PRIu32 " steps=%" PRIu32 " mask=0x%" PRIx32,
+	reply.printf("PLIVE mode=%u enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32 " poll=%" PRIu32 " steps=%" PRIu32 " mask=0x%" PRIx32 " gap=%" PRIu32 "/%" PRIu32,
 				(unsigned int)motorBlock.mode,
 				motorBlock.encoderCount, (double)motorBlock.positionError, (double)motorBlock.currentFraction,
 				motorBlock.commandedStepPhase, motorBlock.measuredStepPhase, (unsigned int)motorBlock.encoderReadOk,
 				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations,
-				motorBlock.stepPollCalls, motorBlock.stepsEmitted, motorBlock.stepPollMask);
+				motorBlock.stepPollCalls, motorBlock.stepsEmitted, motorBlock.stepPollMask,
+				motorBlock.stepGapMinTicks, motorBlock.stepGapMaxTicks);
+	reply.catf(" dirsteps=%" PRIu32 "/%" PRIu32, motorBlock.stepsDirHigh, motorBlock.stepsDirLow);
 #else
 	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
 				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);
@@ -1534,6 +1536,13 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	benchTelLoopCount = 0;
 	benchTelMaxAbsPosErr = 0.0;
 	benchTelResetMs = millis();
+#if TMC_ON_CORE1
+	motorBlock.stepGapMinTicks = 0;
+	motorBlock.stepGapMaxTicks = 0;
+	motorBlock.stepLastTicks = 0;
+	motorBlock.stepsDirHigh = 0;
+	motorBlock.stepsDirLow = 0;
+#endif
 }
 # endif	// SUPPORT_CLOSED_LOOP
 

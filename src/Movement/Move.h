@@ -176,7 +176,10 @@ public:
 	void ResetPhaseStepControlLoopCallTime() noexcept;
 
 # if TMC_ON_CORE1
-	void SetSteppingOnCore1(bool ownedByCore1) noexcept { steppingOnCore1 = ownedByCore1; }	// called with core 1 parked (mode transitions)
+	void SetSteppingOnCore1(bool ownedByCore1) noexcept				// called with core 1 parked (mode transitions)
+	{
+		steppingOnCore1 = ownedByCore1;
+	}
 	void StepPollOnCore1() noexcept SPEED_CRITICAL;					// generate any due open-loop step; polled continuously from the core-1 host loop
 # endif
 #endif

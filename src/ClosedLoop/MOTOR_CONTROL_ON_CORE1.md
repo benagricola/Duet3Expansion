@@ -10,7 +10,7 @@ Both motor-drive methods live on core 1 so that "motor control" is one coherent 
 
 | Mode | What core 1 does each iteration |
 |---|---|
-| `openLoopStep` | Poll the step deadline for the current trajectory point and toggle STEP/DIR; the TMC chip makes the coil currents. Publishes `motorPosition`. (Staging 3, not yet implemented.) |
+| `openLoopStep` | Poll the step deadline for the current trajectory point and toggle STEP/DIR; the TMC chip makes the coil currents. Publishes `motorPosition`. (Staging 3, implemented and bench-validated.) |
 | `closedLoop` | Read encoder → PID + feedforward against the trajectory → write coil currents (XDIRECT). Publishes encoder/error. |
 | `assistedOpen` | Phase follows the commanded position open-loop (XDIRECT); the encoder error only boosts the current above the standstill floor. With zero gains this degenerates to pure phase stepping. |
 | `directCommand` | Apply core 0's commanded phase/current verbatim (used by the tuning/calibration sequencer). |
@@ -91,6 +91,26 @@ the bench. The compiler enforces the separation we kept violating by hand.
    tolerates XIP-cache jitter (unlike the closed-loop cycle). Note that stepping only moves to core 1
    after the first M569 D-mode command creates the closed-loop/kernel state; a board that never
    receives one keeps the core-0 ISR.
+
+   Two staging-3 lessons that cost a lot of bench time, recorded so they are not relearned:
+   - **There is no RP2350 cross-core GPIO restriction.** A long investigation concluded core 1's SIO
+     GPIO writes "don't drive the pads" and grew an IO_BANK0 OUTOVER-override stepping path; both
+     conclusions were measurement artifacts and the override path has been removed again. SIO GPIO
+     registers are shared between cores (RP2350 datasheet §3.1.3) and core-1 stepping through the
+     ordinary `StepDriversHigh`/`StepDriversLow` works.
+   - **Beware the two aliasing instruments.** (a) TMC MSCNT is 10-bit (mod 1024): at x16 microstepping
+     any test of a multiple of 64 pulses returns MSCNT to its start value, which reads as "no steps
+     arrived". (b) The AS5047P is a single-turn encoder and multi-turn position is software
+     accumulation in the kernel's closed-loop cycle; in `openLoopStep` mode nothing accumulates
+     between parked M122 reads, so any move of a whole number of revolutions (A5 = 1 rev, A10 = 2 revs
+     at 640 steps/mm) aliases to zero encoder delta, which reads as "the motor never moved". Validate
+     open-loop motion with sub-half-revolution segments and read the encoder between segments.
+   - The one real waveform defect found: a cache-hot `PrepareForNextSteps` makes the poll's step pulse
+     ~200 ns, which the TMC2240's filtered STEP input (GCONF `multistep_filt`) can drop. The poll now
+     holds STEP high for ≥2 step-timer ticks, the same mechanism the slow-driver ISR path uses.
+   Bench-validated (piecewise-encoder methodology): 10 mm at F750 measured -32767 of -32768 expected
+   counts with every 2 mm segment within ±4 counts, and a full return nets +2; both directions,
+   F60-F750, short and long moves, and D2↔D4 transitions all track exactly.
 4. **Streaming + reporting**, then **validate + data-driven compare** of core-0 vs core-1 builds.
 
    Streaming implemented (done before staging 3, which is independent): the kernel packs M569.5
