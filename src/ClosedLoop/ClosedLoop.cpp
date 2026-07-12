@@ -906,7 +906,11 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 		}
 
 		// Update the statistics
+#if !TMC_ON_CORE1
 		TaskCriticalSectionLocker lock;						// prevent a race with the Heat task that sends the statistics
+		// On core 1 this FreeRTOS critical section is illegal; the statistics are diagnostic accumulators
+		// and a torn read by the reporting task at worst skews one reporting period, so we omit the lock.
+#endif
 
 		const float absPositionError = fabsf(currentPositionError);
 #if MNB_USB_DIAG

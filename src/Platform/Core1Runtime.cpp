@@ -11,6 +11,7 @@
 #if RPXXXX && SPICAN_CORE0_SERVICE
 
 #include <pico/multicore.h>
+#include <pico/platform.h>
 #include <hardware/structs/timer.h>
 #include <Platform/Tasks.h>
 #include <Movement/StepTimer.h>
@@ -115,6 +116,13 @@ namespace Core1Runtime
 
 	bool Park() noexcept
 	{
+		if (get_core_num() != 0)
+		{
+			// Called from core 1 itself. We cannot park ourselves, and any FreeRTOS call from here (the
+			// flash-write path uses delay()) would assert. Reaching here means core 1 tried to initiate a
+			// flash/NVM write, which it must not; return without blocking so we do not crash.
+			return false;
+		}
 		if (parkDepth.fetch_add(1) != 0)
 		{
 			return parked || !started;							// someone else already requested the park
@@ -139,6 +147,10 @@ namespace Core1Runtime
 
 	void Resume() noexcept
 	{
+		if (get_core_num() != 0)
+		{
+			return;
+		}
 		if (parkDepth.fetch_sub(1) == 1)
 		{
 			parkRequested = false;
