@@ -520,7 +520,13 @@ void Move::AppendDiagnostics(const StringRef& reply) noexcept
 	reply.catf(", ebfmin %.2f max %.2f", (double)minExtrusionPending, (double)maxExtrusionPending);
 	minExtrusionPending = maxExtrusionPending = 0.0;
 #endif
-#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#if TMC_ON_CORE1
+	// The core-1 motor kernel keeps these in the motor control block
+	reply.lcatf("Phase step loop runtime (us): min=%" PRIu32 ", max=%" PRIu32 ", frequency (Hz): min=%" PRIu32 ", max=%" PRIu32 ", cycles %" PRIu32 "\n",
+			StepTimer::TicksToIntegerMicroseconds(motorBlock.minCycleRuntime), StepTimer::TicksToIntegerMicroseconds(motorBlock.maxCycleRuntime),
+			TickPeriodToFreq(motorBlock.maxCycleInterval), TickPeriodToFreq(motorBlock.minCycleInterval), motorBlock.cycleCount);
+	ResetPhaseStepMonitoringVariables();
+#elif SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	reply.lcatf("Phase step loop runtime (us): min=%" PRIu32 ", max=%" PRIu32 ", frequency (Hz): min=%" PRIu32 ", max=%" PRIu32 "\n",
 			StepTimer::TicksToIntegerMicroseconds(minPSControlLoopRuntime), StepTimer::TicksToIntegerMicroseconds(maxPSControlLoopRuntime),
 			TickPeriodToFreq(maxPSControlLoopCallInterval), TickPeriodToFreq(minPSControlLoopCallInterval));
@@ -2322,6 +2328,16 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 	return dms[drive].closedLoopControl.ProcessM569Point6(parser, reply);
 }
 
+#if RPXXXX && TMC_ON_CORE1
+// Trajectory query for the core-1 motor kernel (declared in MotorControlBlock.h). Evaluates - and
+// advances - the motion segments exactly as the closed-loop code always has. Runs on core 1, so it
+// must stay RAM-resident; the segment walk takes the cross-core motion lock internally.
+TIME_CRITICAL bool MotorControlGetTrajectory(uint32_t when, MotionParameters& mParams) noexcept
+{
+	return moveInstance->GetCurrentMotion(0, when, mParams);
+}
+#endif
+
 TIME_CRITICAL
 void Move::PhaseStepControlLoop() noexcept
 {
@@ -2384,6 +2400,13 @@ void Move::ResetPhaseStepMonitoringVariables() noexcept
 	maxPSControlLoopRuntime = 1;
 	minPSControlLoopCallInterval = std::numeric_limits<StepTimer::Ticks>::max();
 	maxPSControlLoopCallInterval = 1;
+#if TMC_ON_CORE1
+	// The kernel's copies. Writing them from core 0 races benignly with the kernel (diagnostics only).
+	motorBlock.minCycleRuntime = std::numeric_limits<uint32_t>::max();
+	motorBlock.maxCycleRuntime = 1;
+	motorBlock.minCycleInterval = std::numeric_limits<uint32_t>::max();
+	motorBlock.maxCycleInterval = 1;
+#endif
 }
 
 #endif

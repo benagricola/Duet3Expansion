@@ -21,6 +21,7 @@
 # include "TuningErrors.h"
 # include "SampleBuffer.h"
 # include "Encoders/Encoder.h"
+# include "MotorControlBlock.h"
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
 constexpr float MaxGoodBacklash = 0.15;					// the maximum backlash in full steps that we are happy with - warn if there is more
@@ -31,13 +32,8 @@ class Encoder;
 class SpiEncoder;
 class CanMessageGenericParser;
 
-// Struct to pass data back to the ClosedLoop module
-struct MotionParameters
-{
-	float position = 0.0;
-	float speed = 0.0;
-	float acceleration = 0.0;
-};
+// MotionParameters (the trajectory sample struct) now lives in MotorControlBlock.h, included above,
+// because the core-1 motor kernel shares it and must not include this header.
 
 enum class ClosedLoopMode
 {
@@ -101,6 +97,7 @@ public:
 #endif
 #if TMC_ON_CORE1
 	static void ServiceDeferredNotifications() noexcept;		// core 0 drains FreeRTOS notifies deferred by the core-1 loop
+	void PublishControlParameters(bool resetControl) noexcept;	// hand the PID gains/thresholds to the core-1 motor kernel
 #endif
 
 	// Functions run by tasks

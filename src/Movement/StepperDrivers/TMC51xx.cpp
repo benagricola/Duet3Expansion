@@ -14,6 +14,7 @@
 #include <RTOSIface/RTOSIface.h>
 #include <Platform/Platform.h>
 #include <Movement/Move.h>
+#include <ClosedLoop/MotorControlBlock.h>
 #include <DmacManager.h>
 #include <Platform/TaskPriorities.h>
 #include <General/Portability.h>
@@ -414,6 +415,9 @@ public:
 	uint16_t GetMicrostepPosition() const noexcept { return readRegisters[ReadMsCnt] & 1023; }
 	bool SetXdirect(uint32_t regVal) noexcept;
 	uint32_t GetPhaseToSet() const noexcept { return phaseToSet; }
+#if MNB_USB_DIAG
+	uint32_t GetBenchGconfShadow() const noexcept { return writeRegisters[WriteGConf]; }	// bench diagnostic
+#endif
 	float GetCurrent() const noexcept { return (float)motorCurrent; }
 #endif
 #if SUPPORT_PHASE_STEPPING
@@ -1313,6 +1317,9 @@ static uint32_t lastWakeupTime = 0;
 static StepTimer tmcTimer;
 static bool needToSetCoilCurrents = false;
 static bool setCoilCurrents = false;
+#if MNB_USB_DIAG
+static volatile uint32_t benchXdirectFrames = 0;	// bench diagnostic: XDIRECT coil-current frames staged for SPI transmission
+#endif
 #if TMC_USES_SHARED_SPI
 static bool lastTransferHadXdirect = false;					// whether the last transfer sent an XDIRECT frame before the register frame
 static bool tmcRegRequestOutstanding = false;				// whether a register request has been sent whose response has not yet been captured
@@ -1546,7 +1553,11 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 		// Set the motor phase currents before we write them
+# if TMC_ON_CORE1
+		MotorControl::Cycle();				// the core-1 motor kernel (MotorControlLoop.cpp)
+# else
 		GetMoveInstance().PhaseStepControlLoop();
+# endif
 #endif
 
 		// Set up data to write. Driver 0 is the first in the SPI chain so we must write them in reverse order.
@@ -1558,6 +1569,9 @@ extern "C" [[noreturn]] TIME_CRITICAL void TmcLoop(void *) noexcept
 			tmcPhaseSendData[0] = REGNUM_X_DIRECT | 0x80;
 			StoreBEU32(const_cast<uint8_t*>(tmcPhaseSendData + 1), driverStates[0].GetPhaseToSet());
 			setCoilCurrents = true;
+#  if MNB_USB_DIAG
+			++benchXdirectFrames;
+#  endif
 		}
 # endif
 		driverStates[0].GetSpiCommand(const_cast<uint8_t*>(tmcSendData));
@@ -2004,6 +2018,16 @@ bool SmartDrivers::SetMotorPhases(size_t driver, uint32_t regVal) noexcept
 {
 	return driverStates[driver].SetXdirect(regVal);
 }
+
+# if MNB_USB_DIAG
+// Bench diagnostic: report the XDIRECT staging state so the coil-current path can be traced end to end
+void SmartDrivers::GetBenchXdirectDiag(uint32_t& frames, uint32_t& phaseToSet, uint32_t& gconfShadow) noexcept
+{
+	frames = benchXdirectFrames;
+	phaseToSet = driverStates[0].GetPhaseToSet();
+	gconfShadow = driverStates[0].GetBenchGconfShadow();
+}
+# endif
 
 #endif
 

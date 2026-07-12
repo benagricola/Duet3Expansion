@@ -45,6 +45,22 @@ the bench. The compiler enforces the separation we kept violating by hand.
 1. **Interface + closed-loop kernel** — `MotorControlBlock.h` (done), `MotorControlLoop.cpp` running
    `closedLoop` + `directCommand` + `idle`. Core 0 populates inputs, reads outputs. *Proves the pattern
    and makes closed-loop holding work with zero FreeRTOS on core 1 — the part that needs the determinism.*
+
+   Staging-1 mechanism notes (implemented):
+   - **Trajectory**: the kernel calls `MotorControlGetTrajectory()` (a one-line shim in `Move.cpp` onto
+     the existing `DriveMovement::GetCurrentMotion`), so the proven segment walking/advancement code is
+     reused unchanged rather than reimplemented. The block carries config/commands/telemetry; the
+     12.5 kHz trajectory query stays a direct call. The cross-core motion lock therefore remains in the
+     hot cycle, exactly as in the validated pre-kernel build.
+   - **Encoder**: the kernel calls the abstract `Encoder` interface through a pointer in the block,
+     written by core 0 only while core 1 is parked (and nulled before the encoder is destroyed). The
+     encoder SPI HAL is part of the kernel's allowed surface.
+   - **Not yet ported, rejected with an error under `TMC_ON_CORE1`**: assisted open loop (M569 D5),
+     torque mode (M569.4), closed-loop data collection (M569.5), tuning (M569.6 — staging 2).
+   - **Residual firewall gaps** (documented, accepted): headers reachable from the allowed set declare
+     `delay()`/`millis()` (CoreIO), so a stray `delay()` still compiles; and the trajectory shim is a
+     deliberate, single, audited call into `Move`. Everything FreeRTOS/CAN/flash/object-model is a
+     compile error in the kernel TU (verified by test insertions of `vTaskDelay`/`CanMessageBuffer`).
 2. **Tuning/calibration state machine on core 0** — removes the last flash-write-from-core-1 path.
 3. **Fold in open-loop step generation** — move `Move::Interrupt`/`CalcNextStepTime` stepping onto core 1
    as the `openLoopStep` mode; core 1 becomes the sole owner of motor output and motor position. (Bigger,

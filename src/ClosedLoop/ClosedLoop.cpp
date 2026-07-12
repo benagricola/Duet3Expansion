@@ -209,7 +209,33 @@ void ClosedLoop::InitInstance() noexcept
 	// Set up the data transmission task
 	dataTransmissionTask = new Task<DataCollectionTaskStackWords>;
 	dataTransmissionTask->Create(DataTransmissionTaskEntry, "CLSend", this, TaskPriority::ClosedLoopDataTransmission);
+
+#if TMC_ON_CORE1
+	PublishControlParameters(true);						// give the core-1 kernel the default gains and thresholds
+#endif
 }
+
+#if TMC_ON_CORE1
+// Publish the PID gains and error thresholds to the core-1 motor kernel under the sequence lock.
+// Pass resetControl = true when the gains changed, so the kernel clears its integrator and filters
+// (matching what the pre-core-1 code did on a gain change).
+void ClosedLoop::PublishControlParameters(bool resetControl) noexcept
+{
+	motorBlock.paramSeq = motorBlock.paramSeq + 1;		// odd: update in progress
+	motorBlock.Kp = Kp;
+	motorBlock.Ki = Ki;
+	motorBlock.Kd = Kd;
+	motorBlock.Kv = Kv;
+	motorBlock.Ka = Ka;
+	motorBlock.preErrorThreshold = errorThresholds[0];
+	motorBlock.errorThreshold = errorThresholds[1];
+	motorBlock.paramSeq = motorBlock.paramSeq + 1;		// even: consistent
+	if (resetControl)
+	{
+		motorBlock.resetSeq = motorBlock.resetSeq + 1;
+	}
+}
+#endif
 
 GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const StringRef& reply) noexcept
 {
@@ -320,6 +346,10 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 		}
 	}
 
+#if TMC_ON_CORE1
+	PublishControlParameters(seenPid);					// hand the new gains/thresholds to the core-1 kernel
+#endif
+
 
 	if (seenT)
 	{
@@ -341,6 +371,9 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 #endif
 
 		// We set the mode to open loop earlier in this function so no need to do it here
+#if TMC_ON_CORE1
+		motorBlock.encoder = nullptr;						// core 1 is parked, but it must not see a dangling pointer when it resumes
+#endif
 		DeleteObject(encoder);
 
 		// If the magnetic encoder type was provided, check that it is valid
@@ -415,6 +448,12 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 // M569.4 Set torque mode
 GCodeResult ClosedLoop::ProcessM569Point4(CanMessageGenericParser& parser, const StringRef& reply) noexcept
 {
+#if TMC_ON_CORE1
+	// Torque mode tracks the measured phase every control cycle, so it must live in the core-1 kernel;
+	// it has not been ported yet (the kernel supports idle/closedLoop/directCommand only in staging 1).
+	reply.copy("torque mode is not yet available with motor control on core 1");
+	return GCodeResult::error;
+#else
 	float requestedTorque;
 	if (!parser.GetFloatParam('T', requestedTorque))
 	{
@@ -459,10 +498,15 @@ GCodeResult ClosedLoop::ProcessM569Point4(CanMessageGenericParser& parser, const
 
 	reply.copy("cannot enter torque mode while moving");
 	return GCodeResult::error;
+#endif	// TMC_ON_CORE1
 }
 
 GCodeResult ClosedLoop::ProcessM569Point5(const CanMessageStartClosedLoopDataCollection& msg, const StringRef& reply) noexcept
 {
+#if TMC_ON_CORE1
+	reply.copy("closed loop data collection is not yet available with motor control on core 1");
+	return GCodeResult::error;
+#else
 	if (encoder == nullptr)
 	{
 		reply.copy("No encoder has been configured");
@@ -513,10 +557,18 @@ GCodeResult ClosedLoop::ProcessM569Point5(const CanMessageStartClosedLoopDataCol
 		StartTuning(msg.movement);
 	}
 	return GCodeResult::ok;
+#endif	// TMC_ON_CORE1
 }
 
 GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const StringRef& reply) noexcept
 {
+#if TMC_ON_CORE1
+	// Tuning runs as a state machine inside the control cycle, which now lives in the core-1 kernel.
+	// Staging 2 of the redesign moves the tuning sequencer to core 0 driving the kernel's direct-command
+	// mode; until then tuning is unavailable on this build.
+	reply.copy("tuning is not yet available with motor control on core 1");
+	return GCodeResult::error;
+#else
 	if (encoder == nullptr)
 	{
 		reply.copy("no encoder configured");
@@ -588,6 +640,7 @@ GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const
 
 	StartTuning(desiredTuning);
 	return GCodeResult::notFinished;
+#endif	// TMC_ON_CORE1
 }
 
 bool ClosedLoop::OkayToSetDriverIdle() const noexcept
@@ -1233,8 +1286,15 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 // Report the bench telemetry accumulators as a single parse-friendly line (USB 'F' command)
 /*static*/ void ClosedLoop::BenchTelemetryReport(const StringRef& reply) noexcept
 {
+#if TMC_ON_CORE1
+	// From the kernel's motor control block. Note poserr_max is since the last statistics period
+	// (the mainboard's regular status polls reset it), not since the 'Z' command.
+	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
+				millis() - benchTelResetMs, motorBlock.cycleCount, (double)motorBlock.statMaxAbsError);
+#else
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
 				millis() - benchTelResetMs, benchTelLoopCount, (double)benchTelMaxAbsPosErr);
+#endif
 }
 
 // Arm the per-cycle capture ring (USB 'A' command)
@@ -1270,8 +1330,19 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 // Report a live snapshot of the last control-loop cycle (USB 'P' command)
 /*static*/ void ClosedLoop::BenchLiveProbe(const StringRef& reply) noexcept
 {
+#if TMC_ON_CORE1
+	// The live loop state now lives in the core-1 kernel's motor control block. Also trace the
+	// XDIRECT staging state so a break anywhere in the coil-current path is visible.
+	uint32_t xdFrames, xdPhase, gconf;
+	SmartDrivers::GetBenchXdirectDiag(xdFrames, xdPhase, gconf);
+	reply.printf("PLIVE enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32,
+				motorBlock.encoderCount, (double)motorBlock.positionError, (double)motorBlock.currentFraction,
+				motorBlock.commandedStepPhase, motorBlock.measuredStepPhase, (unsigned int)motorBlock.encoderReadOk,
+				xdFrames, xdPhase, gconf);
+#else
 	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
 				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);
+#endif
 }
 
 // Zero the bench telemetry accumulators (USB 'Z' command)
@@ -1289,6 +1360,11 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 // Perform the FreeRTOS notifications deferred by the core-1 control loop. Called on core 0 from Move::Spin.
 /*static*/ void ClosedLoop::ServiceDeferredNotifications() noexcept
 {
+	if (motorBlock.faultPending)
+	{
+		motorBlock.faultPending = false;
+		Heat::NewDriverFault();
+	}
 	if (deferredDriverFault)
 	{
 		deferredDriverFault = false;
@@ -1319,8 +1395,13 @@ StandardDriverStatus ClosedLoop::ReadLiveStatus() const noexcept
 {
 	StandardDriverStatus result;
 	result.all = 0;
+#if TMC_ON_CORE1
+	result.closedLoopPositionNotMaintained = motorBlock.stall;		// the core-1 kernel owns stall detection
+	result.closedLoopPositionWarning = motorBlock.preStall;
+#else
 	result.closedLoopPositionNotMaintained = stall;
 	result.closedLoopPositionWarning = preStall;
+#endif
 	result.closedLoopNotTuned = ((tuningError & encoder->MinimalTuningNeeded()) != 0);
 	result.closedLoopTuningError = ((tuningError & TuningError::AnyTuningFailure) != 0);
 	return result;
@@ -1352,6 +1433,13 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 	// Trying to enable closed loop
 	if (mode != ClosedLoopMode::open)
 	{
+#if TMC_ON_CORE1
+		if (mode == ClosedLoopMode::assistedOpen)
+		{
+			reply.copy("assisted open loop mode is not supported with motor control on core 1");
+			return false;
+		}
+#endif
 		if (encoder == nullptr)
 		{
 			reply.copy("No encoder specified for closed loop drive mode");
@@ -1396,6 +1484,15 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 	// If we are disabling closed loop mode, we should ideally send steps to get the microstep counter to match the current phase here
 	currentMode = mode;
 
+#if TMC_ON_CORE1
+	// Hand the new state to the core-1 motor kernel. We are called with core 1 parked (the M569/M569.1
+	// paths take a Core1ParkLocker), so the kernel sees a consistent snapshot when it resumes.
+	motorBlock.encoder = encoder;
+	motorBlock.mode = (mode == ClosedLoopMode::closed && tuningError == 0) ? MotorMode::closedLoop : MotorMode::idle;
+	motorBlock.stall = motorBlock.preStall = motorBlock.faultPending = false;
+	motorBlock.resetSeq = motorBlock.resetSeq + 1;			// make the kernel clear its integrator, filters and latches
+#endif
+
 	return true;
 }
 
@@ -1432,8 +1529,13 @@ StandardDriverStatus ClosedLoop::ModifyDriverStatus(StandardDriverStatus origina
 	if (!originalStatus.closedLoopNotTuned)
 	{
 		// Report position warnings and errors even in open loop mode, if tuning has been done
+#if TMC_ON_CORE1
+		originalStatus.closedLoopPositionWarning = motorBlock.preStall;			// the core-1 kernel owns stall detection
+		originalStatus.closedLoopPositionNotMaintained = motorBlock.stall;
+#else
 		originalStatus.closedLoopPositionWarning = preStall;
 		originalStatus.closedLoopPositionNotMaintained = stall;
+#endif
 	}
 
 	return originalStatus;
@@ -1442,6 +1544,28 @@ StandardDriverStatus ClosedLoop::ModifyDriverStatus(StandardDriverStatus origina
 // Get the current fraction and position error statistics
 void ClosedLoop::GetStatistics(ClosedLoopStatus& stat) noexcept
 {
+#if TMC_ON_CORE1
+	// The core-1 kernel accumulates these in the motor control block. Read-and-reset without a lock:
+	// a race with the kernel loses at most one cycle's contribution, which is harmless for diagnostics.
+	const uint32_t numSamples = motorBlock.statSampleCount;
+	if (numSamples == 0)
+	{
+		stat.averageCurrentFraction = stat.maxCurrentFraction = stat.rmsPositionError = stat.maxAbsPositionError = 0.0;
+	}
+	else
+	{
+		stat.averageCurrentFraction = (float16_t)(motorBlock.statSumCurrentFraction/numSamples);
+		stat.maxCurrentFraction = (float16_t)motorBlock.statMaxCurrentFraction;
+		stat.rmsPositionError = (float16_t)fastSqrtf(motorBlock.statSumSqError/numSamples);
+		stat.maxAbsPositionError = (float16_t)motorBlock.statMaxAbsError;
+
+		motorBlock.statSampleCount = 0;
+		motorBlock.statSumCurrentFraction = 0.0;
+		motorBlock.statMaxCurrentFraction = 0.0;
+		motorBlock.statSumSqError = 0.0;
+		motorBlock.statMaxAbsError = 0.0;
+	}
+#else
 	TaskCriticalSectionLocker lock;
 
 	if (periodNumSamples == 0)
@@ -1459,6 +1583,7 @@ void ClosedLoop::GetStatistics(ClosedLoopStatus& stat) noexcept
 		periodNumSamples = 0;
 		periodSumOfCurrentFractions = periodMaxCurrentFraction = periodSumOfPositionErrorSquares = periodMaxAbsPositionError = 0.0;
 	}
+#endif
 }
 
 // Call this if (and only if) we are in torque mode and want to resume normal movement mode.

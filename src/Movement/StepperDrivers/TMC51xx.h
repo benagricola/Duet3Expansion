@@ -44,6 +44,9 @@ namespace SmartDrivers
 	uint16_t GetMicrostepPosition(size_t driver) noexcept;
 	void SetTmcExternalClock(uint32_t frequency) noexcept;
 	bool SetMotorPhases(size_t driver, uint32_t regVal) noexcept;
+# if MNB_USB_DIAG
+	void GetBenchXdirectDiag(uint32_t& frames, uint32_t& phaseToSet, uint32_t& gconfShadow) noexcept;	// bench diagnostic for the coil-current path
+# endif
 #endif
 	bool SetDriverMode(size_t driver, unsigned int mode) noexcept;
 	DriverMode GetDriverMode(size_t driver) noexcept;
