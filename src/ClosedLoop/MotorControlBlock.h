@@ -67,6 +67,22 @@ enum class MotorSampleState : uint8_t
 	overflowed,			// the sample buffer filled before the requested number was collected
 };
 
+// Tuning sweep manoeuvres the kernel can execute (see the tuning sweep fields below)
+enum class MotorSweepKind : uint8_t
+{
+	none = 0,
+	basicTuning,		// move forward/back ~4 full steps collecting linear-regression data (relative encoders)
+	calibrate,			// full-revolution sweep collecting calibration data, clearing the LUT first
+	calibrationCheck,	// as calibrate but keeps the LUT (measures residual errors)
+};
+
+enum class MotorSweepState : uint8_t
+{
+	idle = 0,
+	running,
+	done,				// sweep finished; core 0 performs the completion (result processing, calibration task)
+};
+
 // What the servo does each cycle, chosen by core 0.
 enum class MotorMode : uint32_t
 {
@@ -141,6 +157,14 @@ struct MotorControlBlock
 	volatile uint32_t maxCycleInterval = 0;
 	volatile uint32_t minCycleRuntime = 0xFFFFFFFF;				// step clocks spent in the cycle
 	volatile uint32_t maxCycleRuntime = 0;
+
+	// ---- Tuning sweep (M569.6): armed by core 0, executed by the kernel at the native step pacing ---
+	// The manoeuvre state machines run inside the kernel (in directCommand mode) so the step rate is
+	// paced by step-clock ticks rather than the FreeRTOS tick; core 0 arms one manoeuvre at a time and
+	// waits for done, then performs the completion (which needs FreeRTOS/flash).
+	volatile uint32_t sweepArmSeq = 0;							// bumped by core 0 to arm (or, with kind none, abort); kernel latches sweepKind when it changes
+	volatile MotorSweepKind sweepKind = MotorSweepKind::none;
+	volatile MotorSweepState sweepState = MotorSweepState::idle;	// written by the kernel
 
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel

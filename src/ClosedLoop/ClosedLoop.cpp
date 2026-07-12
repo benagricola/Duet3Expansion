@@ -926,10 +926,69 @@ void ClosedLoop::UpdateKernelMode() noexcept
 				motorBlock.sampleStartMode = 1;
 				motorBlock.sampleArmSeq = motorBlock.sampleArmSeq + 1;
 			}
+			// Dispatch one manoeuvre at a time to the kernel's sweep engine, preserving PerformTune()'s
+			// priority order, chaining and error semantics. The sweep itself runs on core 1 at the
+			// native step pacing; this task only arms it, waits, and performs the completions (which
+			// need FreeRTOS/flash and so cannot run in the kernel).
 			while (tuning != 0)
 			{
-				PerformTune();
-				delay(1);											// one tuning step per tick
+				if (SmartDrivers::GetDriverMode(driverNumber) != DriverMode::direct || encoder == nullptr)
+				{
+					tuningError |= TuningError::SystemError;
+					tuning = 0;
+					break;
+				}
+
+				MotorSweepKind kind;
+				if (tuning & BASIC_TUNING_MANOEUVRE)
+				{
+					kind = MotorSweepKind::basicTuning;
+				}
+				else if (tuning & (ENCODER_CALIBRATION_MANOEUVRE | ENCODER_CALIBRATION_CHECK))
+				{
+					if (tuningError & (TuningError::TooMuchMotion | TuningError::TooLittleMotion | TuningError::InconsistentMotion))
+					{
+						tuning = 0;									// basic tuning failed, so don't attempt encoder calibration
+						break;
+					}
+					kind = (tuning & ENCODER_CALIBRATION_MANOEUVRE) ? MotorSweepKind::calibrate : MotorSweepKind::calibrationCheck;
+				}
+				else if (tuning & STEP_MANOEUVRE)
+				{
+					Step(true);										// just nudges the closed-loop target; no sweep needed
+					tuning = 0;
+					break;
+				}
+				else
+				{
+					tuning = 0;
+					break;
+				}
+
+				motorBlock.sweepKind = kind;
+				motorBlock.sweepArmSeq = motorBlock.sweepArmSeq + 1;
+				while (motorBlock.sweepState != MotorSweepState::done && tuning != 0)
+				{
+					delay(10);
+				}
+				const bool completed = (motorBlock.sweepState == MotorSweepState::done);
+				motorBlock.sweepKind = MotorSweepKind::none;		// disarm; the kernel returns to idle sweep state
+				motorBlock.sweepArmSeq = motorBlock.sweepArmSeq + 1;
+				if (!completed)
+				{
+					break;											// tuning was cancelled externally
+				}
+
+				if (kind == MotorSweepKind::basicTuning)
+				{
+					FinishedBasicTuning();
+					tuning &= ~BASIC_TUNING_MANOEUVRE;				// encoder calibration may follow
+				}
+				else
+				{
+					ReadyToCalibrate(kind == MotorSweepKind::calibrate);
+					tuning = 0;
+				}
 			}
 			if (driveDirect)
 			{
