@@ -174,8 +174,10 @@ namespace Core1Runtime
 	uint32_t GetHeartbeat() noexcept { return heartbeat; }
 	bool IsParked() noexcept { return parked; }
 
-	spin_lock_t *GetCrossCoreLock() noexcept { return crossCoreLock; }
-	spin_lock_t *GetSegmentPoolLock() noexcept { return segmentPoolLock; }
+	// RAM-resident: called from core 1 inside the motion critical section every control cycle, so a
+	// flash fetch here would defeat the point of running the loop on core 1
+	TIME_CRITICAL spin_lock_t *GetCrossCoreLock() noexcept { return crossCoreLock; }
+	TIME_CRITICAL spin_lock_t *GetSegmentPoolLock() noexcept { return segmentPoolLock; }
 }
 
 // Strong overrides of the weak CoreN2G hooks: flash operations park our core-1 runtime through the
