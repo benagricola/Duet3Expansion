@@ -102,7 +102,7 @@ constexpr uint32_t DirectModeSpiSleepMicroseconds = 80;		// closed-loop direct-m
 constexpr uint32_t DirectModeSpiSleepClocks = (StepClockRate * DirectModeSpiSleepMicroseconds)/1000000;
 #endif
 
-static uint32_t DriversDirectSleepClocks = DefaultSpiSleepClocks;	// how long the phase stepping task sleeps for in each cycle. Max SPI message frequency is ~16.7 kHz
+static volatile uint32_t DriversDirectSleepClocks = DefaultSpiSleepClocks;	// how long the direct-mode/phase-step cycle sleeps. volatile: written on core 0 (SetDriverMode), read on core 1 (pacing)
 															// there is 1 write + 1 read/write per motor current setting.
 #else
 constexpr uint32_t DriversSpiClockFrequency = 2000000;		// 2MHz SPI clock
