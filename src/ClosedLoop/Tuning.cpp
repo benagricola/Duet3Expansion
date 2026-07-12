@@ -4,11 +4,11 @@
 #if SUPPORT_CLOSED_LOOP
 
 #include "Encoders/Encoder.h"
+#include "TuningMoves.h"
 
-// NOTE: under TMC_ON_CORE1 the BasicTuning and EncoderCalibration manoeuvres in this file are NOT
-// used: the core-1 motor kernel runs its own ports of them (MotorControlLoop.cpp) at the native step
-// pacing, and the tuning task dispatches to those instead of calling PerformTune(). Keep the two
-// copies in step when changing a manoeuvre.
+// NOTE: the BasicTuning and EncoderCalibration manoeuvre state machines live in TuningMoves.h,
+// shared with the core-1 motor kernel (which runs them at the native step pacing under
+// TMC_ON_CORE1); the functions here are the core-0 host wrappers, used when the kernel is not.
 
 # if SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI
 #  include "Movement/StepperDrivers/TMC51xx.h"
@@ -74,141 +74,19 @@
 
 bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 {
-	enum class BasicTuningState { forwardInitial = 0, forwards, reverseInitial, reverse };
-
-	static BasicTuningState state;									// state machine control
-	static uint16_t initialStepPhase;								// the step phase we started at
-	static unsigned int stepCounter;								// a counter to use within a state
-	static int32_t initialCount;
-	static float regressionAccumulator;
-	static float readingAccumulator;
-
-	// The following parameters define how much we move the motor before taking samples (to overcome backlash) and how far we move the motor.
-	const unsigned int BasicPhaseIncrement = 4;						// how much we normally increase the motor phase by on each step
-	static_assert(4096 % BasicPhaseIncrement == 0);
-	const unsigned int NumDummySteps = 256/BasicPhaseIncrement;		// how many dummy increments to use before we start collecting data, to overcome backlash. (normally 1/4 step)
-	const unsigned int NumSamples = 4096/BasicPhaseIncrement;		// the number of samples we take to do the linear regression (normally 4 full steps)
-	const float HalfNumSamplesMinusOne = (float)(NumSamples - 1) * 0.5;
-
-	// When using linear composite encoders we expect more backlash, therefore we increase the size of the phase increment.
-	const uint16_t PhaseIncrement = (encoder->GetType() == EncoderType::linearComposite)
-									? (uint16_t)(LinearEncoderIncreaseFactor * BasicPhaseIncrement)
-										: (uint16_t)BasicPhaseIncrement;
-	static_assert(4096 % (LinearEncoderIncreaseFactor * BasicPhaseIncrement) == 0);
-
-	const float Denominator = (float)PhaseIncrement * (fcube((float)NumSamples) - (float)NumSamples)/12.0;
-
-	if (!encoder->UsesBasicTuning())
+	// The manoeuvre state machine itself is shared with the core-1 motor kernel: see TuningMoves.h
+	struct Ctx
 	{
-		return true;
-	}
-
-	if (firstIteration)
-	{
-		state = BasicTuningState::forwardInitial;
-		stepCounter = 0;
-		encoder->SetTuningBackwards(false);
-		encoder->ClearFullRevs();
-	}
-
-	const uint32_t currentPosition = desiredStepPhase;
-
-	switch (state)
-	{
-	case BasicTuningState::forwardInitial:
-		// In this state we move forwards a few microsteps to allow the motor to settle down
-		SetMotorPhase(currentPosition + PhaseIncrement, 1.0);
-		++stepCounter;
-		if (stepCounter == NumDummySteps)
-		{
-			regressionAccumulator = readingAccumulator = 0.0;
-			stepCounter = 0;
-			state = BasicTuningState::forwards;
-		}
-		break;
-
-	case BasicTuningState::forwards:
-		// Collect data and move forwards, until we have moved 4 full steps
-		{
-			int32_t reading = encoder->GetCurrentCount();
-			if (stepCounter == 0)
-			{
-				initialCount = reading;
-				initialStepPhase = currentPosition;
-			}
-			reading -= initialCount;
-			readingAccumulator += (float)reading;
-			regressionAccumulator += (float)reading * ((float)stepCounter - HalfNumSamplesMinusOne);
-		}
-
-		++stepCounter;
-		if (stepCounter == NumSamples)
-		{
-			// Save the accumulated data
-			const float slope = regressionAccumulator / Denominator;										// the average encoder counts per phase position
-			const float xMean = (float)initialStepPhase + (float)PhaseIncrement * HalfNumSamplesMinusOne;	// the average phase
-			const float yMean = readingAccumulator/NumSamples + (float)initialCount;						// the average count
-#ifdef DEBUG
-			debugPrintf("forwardYmean %.2f ic %" PRIi32 "\n", (double)yMean, initialCount);
-#endif
-			encoder->SetForwardTuningResults(slope, xMean, yMean);
-			stepCounter = 0;
-			state = BasicTuningState::reverseInitial;
-		}
-		else
-		{
-			SetMotorPhase(currentPosition + PhaseIncrement, 1.0);
-		}
-		break;
-
-	case BasicTuningState::reverseInitial:
-		// In this state we move backwards a few microsteps to allow the motor to settle down
-		SetMotorPhase(currentPosition - PhaseIncrement, 1.0);
-		++stepCounter;
-		if (stepCounter == NumDummySteps)
-		{
-			regressionAccumulator = readingAccumulator = 0.0;
-			stepCounter = 0;
-			state = BasicTuningState::reverse;
-		}
-		break;
-
-	case BasicTuningState::reverse:
-		// Collect data and move backwards, until we have moved 4 full steps
-		{
-			int32_t reading = encoder->GetCurrentCount();
-			if (stepCounter == 0)
-			{
-				initialCount = reading;
-				initialStepPhase = currentPosition;
-			}
-			reading -= initialCount;
-			readingAccumulator += (float)reading;
-			regressionAccumulator += (float)reading * ((float)stepCounter - HalfNumSamplesMinusOne);
-		}
-
-		++stepCounter;
-		if (stepCounter == NumSamples)
-		{
-			// Save the accumulated data
-			const float slope = regressionAccumulator / (-Denominator);			// negate the denominator because the phase increment was negative this time
-			const float xMean = (float)initialStepPhase - (float)PhaseIncrement * HalfNumSamplesMinusOne;
-			const float yMean = readingAccumulator/NumSamples + (float)initialCount;
-#ifdef DEBUG
-			debugPrintf("reverseYmean %.2f ic %" PRIi32 "\n", (double)yMean, initialCount);
-#endif
-			encoder->SetReverseTuningResults(slope, xMean, yMean);
-			FinishedBasicTuning();
-			return true;																// finished tuning
-		}
-		else
-		{
-			SetMotorPhase(currentPosition - PhaseIncrement, 1.0);
-		}
-		break;
-	}
-
-	return false;
+		ClosedLoop& cl;
+		Encoder *encoder;
+		uint16_t GetPhase() const noexcept { return cl.desiredStepPhase; }
+		void SetPhase(uint32_t phase) noexcept { cl.SetMotorPhase((uint16_t)phase, 1.0); }
+		bool IsCalibrating() const noexcept { return (cl.tuning & ENCODER_CALIBRATION_MANOEUVRE) != 0; }
+		void FinishedBasic() noexcept { cl.FinishedBasicTuning(); }
+		void ReadyToCalibrate() noexcept { cl.ReadyToCalibrate(IsCalibrating()); }
+	};
+	Ctx ctx { *this, encoder };
+	return BasicTuningMove(ctx, firstIteration);
 }
 
 
@@ -224,105 +102,19 @@ bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 
 bool ClosedLoop::EncoderCalibration(bool firstIteration) noexcept
 {
-	enum class EncoderCalibrationState { setup = 0, forwards, backwards };
-
-	static EncoderCalibrationState state = EncoderCalibrationState::setup;
-	static uint32_t positionsPerRev;			// this gets set to 1024 * the number of full steps per revolution, i.e. 204800 or 409600
-	static uint32_t positionsTillStart;			// the position we advance to before we start tuning proper
-	static unsigned int phaseIncrementShift;	// we increase the phase position by one << this value for each sample
-	static uint32_t positionCounter;			// how many positions we have moved
-
-	if (!encoder->UsesCalibration())
+	// The manoeuvre state machine itself is shared with the core-1 motor kernel: see TuningMoves.h
+	struct Ctx
 	{
-		return true;							// we don't do this tuning for relative encoders
-	}
-
-	const uint32_t currentPosition = desiredStepPhase;
-
-	if (firstIteration)
-	{
-		// Set up some variables
-		positionsPerRev = ClosedLoop::encoder->GetPhasePositionsPerRev();
-
-		// Decide how many phase positions to advance at a time. This is down to the steps/rev ands the size of our calibration data storage array.
-		phaseIncrementShift = 0;
-		while ((positionsPerRev >> phaseIncrementShift) > Encoder::MaxCalibrationDataPoints)
-		{
-			++phaseIncrementShift;
-		}
-
-		ClosedLoop::encoder->ClearDataCollection(positionsPerRev >> phaseIncrementShift);
-
-		// If calibrating (not checking), clear the mapping table
-		if (ClosedLoop::tuning & ClosedLoop::ENCODER_CALIBRATION_MANOEUVRE)
-		{
-			ClosedLoop::encoder->ClearLUT();
-			ClosedLoop::encoder->SetCalibrationBackwards(false);
-		}
-
-		// To counter any backlash, start by advancing a bit. Then advance to the next position which is a multiple of 4 full steps so that the phase position is zero.
-		positionsTillStart = 4096 - currentPosition;
-		if (positionsTillStart < 256)
-		{
-			positionsTillStart += 4096;
-		}
-
-		state = EncoderCalibrationState::setup;
-	}
-
-	const int32_t currentCount = ClosedLoop::encoder->GetCurrentShaftCount();
-
-	switch (state)
-	{
-	case EncoderCalibrationState::setup:
-		// Advancing to a suitable full step position
-		if (positionsTillStart != 0)
-		{
-			const uint32_t phaseChange = (positionsTillStart % (1u << phaseIncrementShift)) + (1u << phaseIncrementShift);
-			positionsTillStart -= phaseChange;
-			ClosedLoop::SetMotorPhase(currentPosition + phaseChange, 1.0);
-			return false;
-		}
-
-		positionCounter = 0;
-		state = EncoderCalibrationState::forwards;
-		[[fallthrough]];
-
-	case EncoderCalibrationState::forwards:
-		// Advancing slowly and recording positions
-		if (positionCounter < positionsPerRev)
-		{
-			ClosedLoop::encoder->RecordDataPoint(positionCounter >> phaseIncrementShift, currentCount, false);
-		}
-
-		// Move to the next position. After a complete revolution we continue another 256 positions without recording data, ready for the reverse pass.
-		ClosedLoop::SetMotorPhase(currentPosition + (1u << phaseIncrementShift), 1.0);
-		positionCounter += 1u << phaseIncrementShift;
-		if (positionCounter == positionsPerRev + 256)
-		{
-			state = EncoderCalibrationState::backwards;
-		}
-		break;
-
-	case EncoderCalibrationState::backwards:
-		if (positionCounter < positionsPerRev)
-		{
-			ClosedLoop::encoder->RecordDataPoint(positionCounter >> phaseIncrementShift, currentCount, true);
-
-			if (positionCounter == 0)
-			{
-				// We are finished
-				ClosedLoop::ReadyToCalibrate(ClosedLoop::tuning & ClosedLoop::ENCODER_CALIBRATION_MANOEUVRE);
-				return true;
-			}
-		}
-
-		// Move to the next position
-		ClosedLoop::SetMotorPhase(currentPosition - (1u << phaseIncrementShift), 1.0);
-		positionCounter -= 1u << phaseIncrementShift;
-		break;
-	}
-	return false;
+		ClosedLoop& cl;
+		Encoder *encoder;
+		uint16_t GetPhase() const noexcept { return cl.desiredStepPhase; }
+		void SetPhase(uint32_t phase) noexcept { cl.SetMotorPhase((uint16_t)phase, 1.0); }
+		bool IsCalibrating() const noexcept { return (cl.tuning & ENCODER_CALIBRATION_MANOEUVRE) != 0; }
+		void FinishedBasic() noexcept { cl.FinishedBasicTuning(); }
+		void ReadyToCalibrate() noexcept { cl.ReadyToCalibrate(IsCalibrating()); }
+	};
+	Ctx ctx { *this, encoder };
+	return EncoderCalibrationMove(ctx, firstIteration);
 }
 
 

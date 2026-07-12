@@ -1163,7 +1163,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v19 tuning sweep in kernel\n");
+			debugPrintf("Bench: v20 shared tuning moves\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());

@@ -165,6 +165,7 @@ struct MotorControlBlock
 	volatile uint32_t sweepArmSeq = 0;							// bumped by core 0 to arm (or, with kind none, abort); kernel latches sweepKind when it changes
 	volatile MotorSweepKind sweepKind = MotorSweepKind::none;
 	volatile MotorSweepState sweepState = MotorSweepState::idle;	// written by the kernel
+	volatile uint32_t sweepIterations = 0;						// written by the kernel: manoeuvre steps executed (diagnostics)
 
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel

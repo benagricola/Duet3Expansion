@@ -1513,10 +1513,10 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	// XDIRECT staging state so a break anywhere in the coil-current path is visible.
 	uint32_t xdFrames, xdPhase, gconf;
 	SmartDrivers::GetBenchXdirectDiag(xdFrames, xdPhase, gconf);
-	reply.printf("PLIVE enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32,
+	reply.printf("PLIVE enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32,
 				motorBlock.encoderCount, (double)motorBlock.positionError, (double)motorBlock.currentFraction,
 				motorBlock.commandedStepPhase, motorBlock.measuredStepPhase, (unsigned int)motorBlock.encoderReadOk,
-				xdFrames, xdPhase, gconf);
+				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations);
 #else
 	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
 				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);
