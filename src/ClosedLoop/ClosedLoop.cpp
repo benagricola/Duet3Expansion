@@ -71,6 +71,15 @@ SampleBuffer ClosedLoop::sampleBuffer;												// buffer for collecting sampl
 
 // Tasks and task loops
 static Task<DataCollectionTaskStackWords> *dataTransmissionTask = nullptr;			// Data transmission task - handles sending back the buffered sample data
+
+#if TMC_ON_CORE1
+// The control loop runs bare-metal on core 1 and must not call any FreeRTOS API. Where it would notify
+// a FreeRTOS task, it sets one of these flags instead; ServiceDeferredNotifications() drains them on
+// core 0 and performs the real notify. Level-triggered: repeated sets before a drain collapse to one.
+static volatile bool deferredDriverFault = false;
+static volatile bool deferredDataTransmit = false;
+static volatile bool deferredCalibrationReady = false;
+#endif
 static Task<EncoderCalibrationTaskStackWords> *encoderCalibrationTask = nullptr;	// Encoder calibration task - handles calibrating the encoder in the background
 
 extern "C" [[noreturn]] void DataTransmissionTaskEntry(void *param) noexcept
@@ -752,7 +761,11 @@ void ClosedLoop::ReadyToCalibrate(bool store) noexcept
 	{
 		calibrationState = CalibrationState::dataReady;
 		tuningError |= TuningError::TuningOrCalibrationInProgress;			// to prevent movement in case we are re-calibrating
+#if TMC_ON_CORE1
+		deferredCalibrationReady = true;
+#else
 		encoderCalibrationTask->Give(NotifyIndices::ClosedLoopDataTransmission);
+#endif
 	}
 }
 
@@ -832,7 +845,11 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 						stall = errorThresholds[1] > 0 && positionErr > errorThresholds[1];
 						if (stall)
 						{
+#if TMC_ON_CORE1
+							deferredDriverFault = true;					// core 1 cannot call FreeRTOS; SmartDrivers::Spin forwards this
+#else
 							Heat::NewDriverFault();
+#endif
 						}
 						else
 						{
@@ -966,7 +983,11 @@ void ClosedLoop::CollectSample() noexcept
 		}
 	}
 
+#if TMC_ON_CORE1
+	deferredDataTransmit = true;
+#else
 	dataTransmissionTask->Give(NotifyIndices::ClosedLoopDataTransmission);
+#endif
 }
 
 // Control the motor phase currents, returning the fraction of maximum current that we commanded
@@ -1116,6 +1137,28 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	//DEBUG
 	//reply.catf(", event status 0x%08" PRIx32 ", TCC2 CTRLA 0x%08" PRIx32 ", TCC2 EVCTRL 0x%08" PRIx32, EVSYS->CHSTATUS.reg, QuadratureTcc->CTRLA.reg, QuadratureTcc->EVCTRL.reg);
 }
+
+#if TMC_ON_CORE1
+// Perform the FreeRTOS notifications deferred by the core-1 control loop. Called on core 0 from Move::Spin.
+/*static*/ void ClosedLoop::ServiceDeferredNotifications() noexcept
+{
+	if (deferredDriverFault)
+	{
+		deferredDriverFault = false;
+		Heat::NewDriverFault();
+	}
+	if (deferredDataTransmit)
+	{
+		deferredDataTransmit = false;
+		if (dataTransmissionTask != nullptr) { dataTransmissionTask->Give(NotifyIndices::ClosedLoopDataTransmission); }
+	}
+	if (deferredCalibrationReady)
+	{
+		deferredCalibrationReady = false;
+		if (encoderCalibrationTask != nullptr) { encoderCalibrationTask->Give(NotifyIndices::ClosedLoopDataTransmission); }
+	}
+}
+#endif
 
 /*static*/ void ClosedLoop::Diagnostics(const StringRef& reply) noexcept
 {

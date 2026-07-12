@@ -91,6 +91,9 @@ public:
 
 	static void Init() noexcept;
 	static void Diagnostics(const StringRef& reply) noexcept;
+#if TMC_ON_CORE1
+	static void ServiceDeferredNotifications() noexcept;		// core 0 drains FreeRTOS notifies deferred by the core-1 loop
+#endif
 
 	// Functions run by tasks
 	[[noreturn]] void DataTransmissionTaskLoop() noexcept;
