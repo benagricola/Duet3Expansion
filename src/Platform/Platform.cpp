@@ -402,6 +402,13 @@ namespace Platform
 		NVIC->ICER[0] = 0xFFFFFFFF;						// Disable IRQs
 		NVIC->ICPR[0] = 0xFFFFFFFF;						// Clear pending IRQs
 #elif RPXXXX
+# if RPXXXX && SPICAN_CORE0_SERVICE
+		// Halt core 1 before the update: it runs the control loop, and an RP2350 watchdog reset does not
+		// reliably reset core 1, so otherwise it keeps executing (from flash being erased) across the
+		// update and hangs the new firmware on boot. Once halted here it stays in the bootrom until the
+		// new firmware relaunches it.
+		Core1Runtime::HaltForReset();
+# endif
 		// We reboot and update the firmware in a similar manner to bootloader updates on other boards
 		watchdog_hw->scratch[UpdateFirmwareMagicWordIndex] = UpdateFirmwareMagicValue;
 		ResetProcessor();

@@ -101,7 +101,8 @@ namespace Core1Runtime
 			core1Entry = entry;
 			Init();
 			multicore_reset_core1();
-			delay(100);												// match the proven CAN-core-1 launch timing; a short delay can leave core 1 not fully reset after a software reboot (M997), hanging the relaunch
+			multicore_fifo_drain();									// clear any stale inter-core FIFO data before the launch handshake
+			delay(100);												// match the proven CAN-core-1 launch timing
 			multicore_launch_core1(Core1RuntimeEntry);
 			started = true;
 		}
@@ -110,6 +111,15 @@ namespace Core1Runtime
 	void Start() noexcept
 	{
 		Start(nullptr);
+	}
+
+	void HaltForReset() noexcept
+	{
+		if (started)
+		{
+			multicore_reset_core1();								// put core 1 back in the bootrom, halted
+			started = false;
+		}
 	}
 
 	bool IsStarted() noexcept { return started; }
