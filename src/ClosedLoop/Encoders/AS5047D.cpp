@@ -8,11 +8,16 @@
 #include "AS5047D.h"
 
 #if TMC_ON_CORE1
-// The control loop on core 1 owns the encoder SPI bus: the clock and mode are latched during
-// initialisation (which runs on core 0 through the normal Select path), and every core-0 access
-// afterwards parks the core-1 loop first. A FreeRTOS mutex cannot be taken from core 1.
-# define EncoderSpiSelect()		(true)
-# define EncoderSpiDeselect()	((void)0)
+# include <pico/platform.h>			// for get_core_num()
+
+// The encoder SPI bus is accessed from core 0 (initialisation, diagnostics, calibration - all of which
+// park the core-1 loop first) and from core 1 (the per-cycle read in the closed-loop control loop).
+// Both must configure the bus hardware; only core 0 can take the FreeRTOS bus mutex. Core 1 uses the
+// no-mutex path and relies on the park protocol for exclusion. The core is checked at run time because
+// the same functions run on both cores. Selecting must never be skipped: the shared-SPI Select() enables
+// the PIO state machine, without which a transfer spins forever waiting for the RX FIFO.
+# define EncoderSpiSelect()		((get_core_num() != 0) ? (spi.SelectNoMutex(), true) : spi.Select(0))
+# define EncoderSpiDeselect()	((get_core_num() != 0) ? spi.DeselectNoMutex() : spi.Deselect())
 #else
 # define EncoderSpiSelect()		(spi.Select(0))
 # define EncoderSpiDeselect()	(spi.Deselect())
