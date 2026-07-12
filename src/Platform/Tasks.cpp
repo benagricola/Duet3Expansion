@@ -892,7 +892,10 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 	// Append a memory report to a string
 	reply.lcatf("Never used RAM %d, free system stack %d words", GetNeverUsedRam(), GetHandlerFreeStack()/4);
 #if RPXXXX && SPICAN_CORE0_SERVICE
-	reply.lcatf("Core 1: %s, heartbeat %" PRIu32, (!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running", Core1Runtime::GetHeartbeat());
+	reply.lcatf("Core 1: %s, heartbeat %" PRIu32 ", resetAttempts %" PRIu32 "%s",
+				(!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running",
+				Core1Runtime::GetHeartbeat(), Core1Runtime::GetResetAttempts(),
+				Core1Runtime::LaunchFailed() ? " LAUNCH-FAILED" : "");
 #endif
 	reply.lcat("Tasks:");
 

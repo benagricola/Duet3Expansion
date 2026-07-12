@@ -13,6 +13,9 @@
 #include <pico/multicore.h>
 #include <pico/platform.h>
 #include <hardware/structs/timer.h>
+#include <hardware/structs/psm.h>
+#include <hardware/structs/sio.h>
+#include <hardware/irq.h>
 #include <Platform/Tasks.h>
 #include <Movement/StepTimer.h>
 #include <atomic>
@@ -35,6 +38,51 @@ namespace Core1Runtime
 	static bool started = false;
 	static std::atomic<int> parkDepth(0);
 	static Core1EntryFn core1Entry = nullptr;
+
+	// Diagnostics for the core-1 relaunch (surfaced by the 'D' USB report). On RP2350 a watchdog
+	// reset does not power-cycle core 1, so after a firmware update or software reset core 1 has been
+	// running continuously since the last cold boot; the stock relaunch handshake then hangs on that
+	// asymmetry. RobustResetCore1() hard power-cycles core 1 with a bounded, retried handshake so the
+	// reset cannot hang, and Start() boots without core 1 (setting launchFailed) rather than lock up
+	// if core 1 never acknowledges.
+	static volatile bool launchFailed = false;			// core 1 could not be brought up; core 0 booted without it
+	static volatile uint32_t lastResetAttempts = 0;		// how many force-off/on attempts the last reset needed (0 = not yet run)
+
+	// Bounded, retrying replacement for the SDK's multicore_reset_core1() (which pop_blocking-waits
+	// forever for core 1's readiness word). Hard power-cycles core 1 through the PSM and waits, bounded,
+	// for the bootrom to signal ready; retries the whole power-cycle if it does not. Returns false if
+	// core 1 never acknowledges, so the caller can boot without it instead of hanging.
+	static bool RobustResetCore1(uint32_t perAttemptMillis, unsigned int maxAttempts) noexcept
+	{
+		const uint irqNum = SIO_FIFO_IRQ_NUM(0);
+		const bool irqWasEnabled = irq_is_enabled(irqNum);
+		irq_set_enabled(irqNum, false);						// the FIFO handshake must not race the FIFO IRQ
+
+		bool acknowledged = false;
+		unsigned int attempt = 0;
+		for (; attempt < maxAttempts && !acknowledged; ++attempt)
+		{
+			hw_set_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);			// hard power-cycle core 1
+			while ((psm_hw->frce_off & PSM_FRCE_OFF_PROC1_BITS) == 0) { tight_loop_contents(); }
+			multicore_fifo_drain();												// clear stale core-1 -> core-0 words before release
+			hw_clear_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);			// release: core 1 runs its bootrom and pushes a readiness word
+
+			const uint32_t start = millis();
+			while (millis() - start < perAttemptMillis)
+			{
+				if (multicore_fifo_rvalid())
+				{
+					(void)sio_hw->fifo_rd;										// consume the readiness word
+					acknowledged = true;
+					break;
+				}
+			}
+		}
+
+		lastResetAttempts = attempt;
+		irq_set_enabled(irqNum, irqWasEnabled);
+		return acknowledged;
+	}
 
 	// Service housekeeping until the deadline. This is the only place core 1 parks, so a worker entry
 	// (e.g. the TMC control loop) must call it between cycles. Bare metal: no scheduler on this core.
@@ -100,10 +148,18 @@ namespace Core1Runtime
 		{
 			core1Entry = entry;
 			Init();
-			multicore_reset_core1();
+			// Bounded, retried hard reset rather than the SDK's multicore_reset_core1(), which can hang
+			// forever on a warm (non-cold) boot. If core 1 will not come up, boot without it instead of
+			// locking up: the 'D' report shows launchFailed and the board stays alive and re-flashable.
+			if (!RobustResetCore1(50, 5))
+			{
+				launchFailed = true;
+				return;
+			}
 			multicore_fifo_drain();									// clear any stale inter-core FIFO data before the launch handshake
 			delay(100);												// match the proven CAN-core-1 launch timing
 			multicore_launch_core1(Core1RuntimeEntry);
+			launchFailed = false;
 			started = true;
 		}
 	}
@@ -195,6 +251,8 @@ namespace Core1Runtime
 
 	uint32_t GetHeartbeat() noexcept { return heartbeat; }
 	bool IsParked() noexcept { return parked; }
+	bool LaunchFailed() noexcept { return launchFailed; }
+	uint32_t GetResetAttempts() noexcept { return lastResetAttempts; }
 
 	// RAM-resident: called from core 1 inside the motion critical section every control cycle, so a
 	// flash fetch here would defeat the point of running the loop on core 1

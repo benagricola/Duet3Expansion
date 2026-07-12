@@ -1163,7 +1163,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v8 core1 pacing+m997+volatile\n");
+			debugPrintf("Bench: v10 core1 robust-relaunch + usb-reset\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());

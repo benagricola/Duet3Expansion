@@ -49,6 +49,8 @@ namespace Core1Runtime
 
 	uint32_t GetHeartbeat() noexcept;				// increments continuously while the core-1 loop is alive
 	bool IsParked() noexcept;
+	bool LaunchFailed() noexcept;					// true if Start() could not bring core 1 up and booted without it
+	uint32_t GetResetAttempts() noexcept;			// force-off/on attempts the last core-1 reset needed (diagnostics)
 
 	spin_lock_t *GetCrossCoreLock() noexcept;		// guards the motion segment structures; initialised by Init()
 	spin_lock_t *GetSegmentPoolLock() noexcept;		// guards the MoveSegment freelist (separate lock: the motion lock is held while segments are released)
