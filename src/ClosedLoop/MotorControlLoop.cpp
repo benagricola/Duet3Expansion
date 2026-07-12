@@ -54,6 +54,7 @@ namespace MotorControl
 	// Local copies of the seqlocked gain group (refreshed when paramSeq changes)
 	static float Kp = 0.0, Ki = 0.0, Kd = 0.0, Kv = 0.0, Ka = 0.0;
 	static float preErrorThreshold = 0.0, errorThreshold = 0.0;
+	static float holdCurrentFraction = 0.25;
 
 	// Last-cycle control values kept for diagnostic sampling (the pre-kernel code sampled the
 	// equivalent ClosedLoop instance fields)
@@ -177,10 +178,12 @@ namespace MotorControl
 			}
 			const float p = motorBlock.Kp, i = motorBlock.Ki, d = motorBlock.Kd, v = motorBlock.Kv, a = motorBlock.Ka;
 			const float pre = motorBlock.preErrorThreshold, err = motorBlock.errorThreshold;
+			const float hold = motorBlock.holdCurrentFraction;
 			if (motorBlock.paramSeq == seqBefore)
 			{
 				Kp = p; Ki = i; Kd = d; Kv = v; Ka = a;
 				preErrorThreshold = pre; errorThreshold = err;
+				holdCurrentFraction = hold;
 				lastParamSeq = seqBefore;
 				return;
 			}
@@ -236,7 +239,7 @@ namespace MotorControl
 		const uint32_t now = StepTimer::ConvertLocalToMovementTime(cycleStartTime);
 		MotionParameters mParams;
 		bool hasMove = false;
-		if (mode == MotorMode::closedLoop)
+		if (mode == MotorMode::closedLoop || mode == MotorMode::assistedOpen)
 		{
 			hasMove = MotorControlGetTrajectory(now, mParams);
 		}
@@ -274,23 +277,42 @@ namespace MotorControl
 		}
 		else
 		{
-			// Closed loop: PID + feedforward, ported verbatim from ClosedLoop::ControlMotorCurrents.
+			// Closed loop / assisted open loop, ported verbatim from ClosedLoop::ControlMotorCurrents.
 			// The control signal is chosen to be in the range -256..256 (arbitrary, as in the original).
 			const float PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
 			const float PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
-			const float timeDelta = (float)timeElapsed * (1.0/(float)StepTimer::StepClockRate);
-			PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
-			const float PIDVTerm = mParams.speed * Kv * timeElapsed;
-			const float PIDATerm = mParams.acceleration * Ka * fsquare((float)timeElapsed);
-			const float PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
+			float PIDControlSignal, PIDVTerm, PIDATerm;
+			uint16_t commandedStepPhase;
+			if (mode == MotorMode::closedLoop)
+			{
+				const float timeDelta = (float)timeElapsed * (1.0/(float)StepTimer::StepClockRate);
+				PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
+				PIDVTerm = mParams.speed * Kv * timeElapsed;
+				PIDATerm = mParams.acceleration * Ka * fsquare((float)timeElapsed);
+				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
 
-			// Phase of the motor current is always +/- 1 full step relative to the measured position,
-			// with a speed-dependent feedforward, and the current magnitude follows the PID result.
-			const float PhaseFeedForwardFactor = 1000.0;
-			const int16_t phaseFeedForward = (int16_t)lrintf(constrain<float>(speedFilter.GetDerivative() * timeElapsed * PhaseFeedForwardFactor, -256.0, 256.0));
-			const uint16_t adjustedStepPhase = (uint16_t)((int16_t)measuredStepPhase + phaseFeedForward) % 4096u;
-			const uint16_t commandedStepPhase = (((PIDControlSignal < 0.0) ? (3 * 1024) : 1024) + adjustedStepPhase) % 4096u;
-			currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
+				// Phase of the motor current is always +/- 1 full step relative to the measured position,
+				// with a speed-dependent feedforward, and the current magnitude follows the PID result.
+				const float PhaseFeedForwardFactor = 1000.0;
+				const int16_t phaseFeedForward = (int16_t)lrintf(constrain<float>(speedFilter.GetDerivative() * timeElapsed * PhaseFeedForwardFactor, -256.0, 256.0));
+				const uint16_t adjustedStepPhase = (uint16_t)((int16_t)measuredStepPhase + phaseFeedForward) % 4096u;
+				commandedStepPhase = (((PIDControlSignal < 0.0) ? (3 * 1024) : 1024) + adjustedStepPhase) % 4096u;
+				currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
+			}
+			else
+			{
+				// Assisted open loop: the phase follows the commanded position; the I term is not used
+				// and the A and V terms are independent of the loop time. The error only boosts the
+				// current above the standstill floor.
+				constexpr float scalingFactor = 100.0;
+				PIDVTerm = mParams.speed * Kv * scalingFactor;
+				PIDATerm = mParams.acceleration * Ka * fsquare(scalingFactor);
+				PIDControlSignal = min<float>(fabsf(PIDPTerm + PIDDTerm) + fabsf(PIDVTerm) + fabsf(PIDATerm), 256.0);
+
+				const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0);	// llrintf so the float operand is always convertible; only the low 12 bits matter
+				commandedStepPhase = (stepPhase + motorBlock.phaseOffset) % 4096u;
+				currentFraction = holdCurrentFraction + (1.0 - holdCurrentFraction) * min<float>(PIDControlSignal * (1.0/256.0), 1.0);
+			}
 			SetMotorPhase(commandedStepPhase, currentFraction);
 
 			// Keep the control values for diagnostic sampling

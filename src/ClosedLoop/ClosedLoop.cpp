@@ -255,6 +255,7 @@ void ClosedLoop::PublishControlParameters(bool resetControl) noexcept
 	motorBlock.Ka = Ka;
 	motorBlock.preErrorThreshold = errorThresholds[0];
 	motorBlock.errorThreshold = errorThresholds[1];
+	motorBlock.holdCurrentFraction = holdCurrentFraction;
 	motorBlock.paramSeq = motorBlock.paramSeq + 1;		// even: consistent
 	if (resetControl)
 	{
@@ -693,6 +694,9 @@ void ClosedLoop::UpdateStandstillCurrent() noexcept
 {
 #if SINGLE_DRIVER
 	holdCurrentFraction = SmartDrivers::GetStandstillCurrentPercent(driverNumber) * 0.01;
+# if TMC_ON_CORE1
+	PublishControlParameters(false);				// the kernel's assistedOpen current floor tracks it
+# endif
 #else
 # error Multi driver code not implemented
 #endif
@@ -887,8 +891,10 @@ void ClosedLoop::StartTuning(uint8_t tuningMode) noexcept
 // and make it reset its control state. Call after any transition that changes either.
 void ClosedLoop::UpdateKernelMode() noexcept
 {
-	motorBlock.mode = (currentMode == ClosedLoopMode::closed && tuningError == 0 && tuning == 0)
-						? MotorMode::closedLoop : MotorMode::idle;
+	motorBlock.mode = (tuningError != 0 || tuning != 0) ? MotorMode::idle
+						: (currentMode == ClosedLoopMode::closed) ? MotorMode::closedLoop
+							: (currentMode == ClosedLoopMode::assistedOpen) ? MotorMode::assistedOpen
+								: MotorMode::idle;
 	motorBlock.resetSeq = motorBlock.resetSeq + 1;
 }
 
@@ -1570,13 +1576,6 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 	// Trying to enable closed loop
 	if (mode != ClosedLoopMode::open)
 	{
-#if TMC_ON_CORE1
-		if (mode == ClosedLoopMode::assistedOpen)
-		{
-			reply.copy("assisted open loop mode is not supported with motor control on core 1");
-			return false;
-		}
-#endif
 		if (encoder == nullptr)
 		{
 			reply.copy("No encoder specified for closed loop drive mode");
@@ -1641,6 +1640,9 @@ void ClosedLoop::DriverSwitchedToClosedLoop() noexcept
 	{
 		const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0);
 		phaseOffset = (currentPhasePosition - stepPhase) & 4095;
+#if TMC_ON_CORE1
+		motorBlock.phaseOffset = phaseOffset;		// core 1 is parked during this transition
+#endif
 	}
 	desiredStepPhase = currentPhasePosition;
 	SetMotorPhase(currentPhasePosition, SmartDrivers::GetStandstillCurrentPercent(driverNumber) * 0.01);	// set the motor currents to match the initial position using the open loop standstill current

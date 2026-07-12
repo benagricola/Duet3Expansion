@@ -73,6 +73,7 @@ enum class MotorMode : uint32_t
 	idle = 0,			// motor de-energised / holding; the kernel does nothing (core 0 owns the encoder in this mode)
 	openLoopStep,		// open loop: generate STEP pulses from the trajectory, TMC makes the currents (staging 3)
 	closedLoop,			// closed loop: firmware computes coil currents by PID against the trajectory
+	assistedOpen,		// phase follows the commanded position open-loop; the encoder error only boosts the current
 	directCommand,		// apply commandedPhase/commandedCurrentFraction verbatim (used by tuning/calibration)
 };
 
@@ -94,6 +95,11 @@ struct MotorControlBlock
 	volatile float Kp = 0, Ki = 0, Kd = 0, Kv = 0, Ka = 0;
 	volatile float currentLimitFraction = 1.0;					// max fraction of configured motor current (not yet applied in staging 1)
 	volatile float preErrorThreshold = 0, errorThreshold = 0;	// in full steps; 0 disables that check
+	volatile float holdCurrentFraction = 0.25;					// the current floor in assistedOpen mode (from the standstill current percentage)
+
+	// Phase offset for assistedOpen mode: aligns the commanded-position phase with the rotor's
+	// measured phase at mode entry. Written only while core 1 is parked (the mode transition).
+	volatile uint16_t phaseOffset = 0;
 
 	// Feature config (phase advance / flux braking), read every cycle. (Not yet used by the kernel:
 	// the ported control law has its own fixed phase feedforward, matching the proven behaviour.)
