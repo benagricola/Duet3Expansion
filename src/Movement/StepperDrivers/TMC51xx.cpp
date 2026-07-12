@@ -929,7 +929,9 @@ bool TmcDriverState::SetDriverMode(unsigned int mode) noexcept
 DriverMode TmcDriverState::GetDriverMode() const noexcept
 {
 	return
-#if TMC_TYPE == 5160 && (SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP)
+#if (TMC_TYPE == 5160 || TMC_TYPE == 2240) && (SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP)
+		  // The TMC2240 uses the same GCONF direct_mode bit as the TMC5160, and this port drives its
+		  // closed loop through it; without this the direct-mode check in M569.6 always fails on 2240 boards
 		  ((writeRegisters[WriteGConf] & GCONF_DIRECT_MODE) != 0) ? DriverMode::direct :
 #endif
 		  ((writeRegisters[WriteGConf] & GCONF_STEALTHCHOP) != 0) ? DriverMode::stealthChop
