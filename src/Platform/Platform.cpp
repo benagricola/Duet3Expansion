@@ -877,8 +877,11 @@ void Platform::InitMinimal()
 #endif
 	CanInterface::Init(GetCanAddress(), CANInstanceNumber, UseLaterCanPins, false);
 
-#if RPXXXX && SPICAN_CORE0_SERVICE
-	Core1Runtime::Start();											// CAN is serviced from core 0, so core 1 is ours
+#if RPXXXX && SPICAN_CORE0_SERVICE && !TMC_ON_CORE1
+	// CAN is serviced from core 0, so core 1 is free; launch the idle runtime (heartbeat/mailbox).
+	// When TMC_ON_CORE1 the driver owns the core-1 launch (SmartDrivers::Init starts the control loop),
+	// so we must not claim it here first - whichever Start() runs first wins.
+	Core1Runtime::Start();
 #endif
 }
 
