@@ -1,15 +1,15 @@
 /*
- * ServoControlBlock.h
+ * MotorControlBlock.h
  *
- * The single, explicit interface between the two cores when the closed-loop servo runs on core 1.
+ * The single, explicit interface between the two cores when motor control runs on core 1.
  *
  * DESIGN (Option 2 - isolate the hot loop):
  *   The 80us control cycle is split into two layers that talk ONLY through this block:
  *
- *   - CORE 1 (the servo, bare metal, in ServoLoop.cpp): a tiny pure kernel. Every cycle it reads the
+ *   - CORE 1 (the servo, bare metal, in MotorControlLoop.cpp): a tiny pure kernel. Every cycle it reads the
  *     encoder, reads its inputs from this block, either runs the PID or applies a direct command, sets
  *     the coil currents, and writes its outputs back to this block. It calls NO FreeRTOS, NO flash, NO
- *     allocation, NO notifications - none of it is reachable from ServoLoop.cpp, so a stray call is a
+ *     allocation, NO notifications - none of it is reachable from MotorControlLoop.cpp, so a stray call is a
  *     LINK ERROR at build time, not a reset at 200MHz on the bench. That is the whole point.
  *
  *   - CORE 0 (management, a normal FreeRTOS task/handlers): owns everything that is not the hot cycle -
@@ -25,25 +25,26 @@
  *   (core 0). This header pulls in nothing from FreeRTOS/flash so it is safe to include from either side.
  */
 
-#ifndef SRC_CLOSEDLOOP_SERVOCONTROLBLOCK_H_
-#define SRC_CLOSEDLOOP_SERVOCONTROLBLOCK_H_
+#ifndef SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_
+#define SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_
 
 #include <cstdint>
 
 #if RPXXXX && TMC_ON_CORE1
 
 // What the servo does each cycle, chosen by core 0.
-enum class ServoMode : uint32_t
+enum class MotorMode : uint32_t
 {
-	idle = 0,			// hold zero current; publish encoder only
-	servo,				// closed-loop PID against the commanded trajectory
+	idle = 0,			// motor de-energised / holding; publish encoder only
+	openLoopStep,		// open loop: generate STEP pulses from the trajectory, TMC makes the currents (Phase 2)
+	closedLoop,			// closed loop: firmware computes coil currents by PID against the trajectory
 	directCommand,		// apply commandedPhase/commandedCurrentFraction verbatim (used by tuning/calibration)
 };
 
-struct ServoControlBlock
+struct MotorControlBlock
 {
 	// ---- Inputs: written by core 0, read by core 1 --------------------------------------------------
-	volatile ServoMode mode = ServoMode::idle;
+	volatile MotorMode mode = MotorMode::idle;
 
 	// PID + feedforward gain set. Written as a group under paramSeq (odd = update in progress).
 	volatile uint32_t paramSeq = 0;
@@ -70,6 +71,7 @@ struct ServoControlBlock
 	volatile uint16_t commandedStepPhase = 0;
 	volatile uint16_t measuredStepPhase = 0;
 	volatile bool encoderReadOk = true;							// false if the last encoder read failed
+	volatile int32_t motorPosition = 0;							// steps taken so far (open-loop-step path; Phase 2). Core 0 reads for reporting/next-move planning.
 
 	// Event flags: set by core 1, cleared by core 0 after it has actioned them.
 	volatile bool faultPending = false;							// position error exceeded errorThreshold
@@ -95,9 +97,9 @@ struct ServoControlBlock
 	volatile uint32_t sampleRing[SampleRingSize] = { };			// packed sample words (format agreed out of band)
 };
 
-// The one shared instance lives in ordinary RAM (not the flash-cached region). Defined in ServoLoop.cpp.
-extern ServoControlBlock servoBlock;
+// The one shared instance lives in ordinary RAM (not the flash-cached region). Defined in MotorControlLoop.cpp.
+extern MotorControlBlock motorBlock;
 
 #endif	// RPXXXX && TMC_ON_CORE1
 
-#endif /* SRC_CLOSEDLOOP_SERVOCONTROLBLOCK_H_ */
+#endif /* SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_ */
