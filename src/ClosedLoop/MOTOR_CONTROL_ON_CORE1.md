@@ -10,10 +10,11 @@ Both motor-drive methods live on core 1 so that "motor control" is one coherent 
 
 | Mode | What core 1 does each iteration |
 |---|---|
-| `openLoopStep` | Poll the step deadline for the current trajectory point and toggle STEP/DIR; the TMC chip makes the coil currents. Publishes `motorPosition`. |
+| `openLoopStep` | Poll the step deadline for the current trajectory point and toggle STEP/DIR; the TMC chip makes the coil currents. Publishes `motorPosition`. (Staging 3, not yet implemented.) |
 | `closedLoop` | Read encoder → PID + feedforward against the trajectory → write coil currents (XDIRECT). Publishes encoder/error. |
+| `assistedOpen` | Phase follows the commanded position open-loop (XDIRECT); the encoder error only boosts the current above the standstill floor. With zero gains this degenerates to pure phase stepping. |
 | `directCommand` | Apply core 0's commanded phase/current verbatim (used by the tuning/calibration sequencer). |
-| `idle` | De-energised/holding; publish encoder only. |
+| `idle` | Core 1 does nothing; core 0 owns the encoder and the motor (open-loop step/dir modes, transitions). |
 
 ## Why both methods on core 1
 

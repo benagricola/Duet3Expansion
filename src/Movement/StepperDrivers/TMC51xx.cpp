@@ -1095,6 +1095,13 @@ void TmcDriverState::AppendDriverStatus(const StringRef& reply, bool clearGlobal
 	}
 	ResetLoadRegisters();
 
+#if TMC_TYPE == 2240
+	// The TMC2240 reads its junction temperature and supply voltage over SPI; report them like the
+	// TMC22xx driver does. Watching the temperature matters especially in direct (XDIRECT) modes,
+	// where the chip's automatic current reduction does not operate.
+	reply.catf(", temp %.1fC, VS %.1fV", (double)GetDriverTemperature(), (double)GetSupplyVoltage());
+#endif
+
 	reply.catf(", mspos %u, reads %u, writes %u timeouts %u", (unsigned int)(readRegisters[ReadMsCnt] & 1023), numReads, numWrites, numTimeouts);
 	numReads = numWrites = 0;
 	if (clearGlobalStats)
