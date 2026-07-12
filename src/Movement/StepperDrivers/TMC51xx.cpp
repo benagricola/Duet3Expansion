@@ -93,6 +93,10 @@ constexpr uint32_t PhaseStepSpiSleepMicroseconds = 125;		// Sleep time used for 
 
 constexpr uint32_t DefaultSpiSleepClocks = (StepClockRate * DefaultSpiSleepMicroseconds)/1000000;
 constexpr uint32_t PhaseStepSpiSleepClocks = (StepClockRate * PhaseStepSpiSleepMicroseconds)/1000000;
+#if SUPPORT_CLOSED_LOOP
+constexpr uint32_t DirectModeSpiSleepMicroseconds = 80;		// closed-loop direct-mode control cycle time (12.5kHz)
+constexpr uint32_t DirectModeSpiSleepClocks = (StepClockRate * DirectModeSpiSleepMicroseconds)/1000000;
+#endif
 
 static uint32_t DriversDirectSleepClocks = DefaultSpiSleepClocks;	// how long the phase stepping task sleeps for in each cycle. Max SPI message frequency is ~16.7 kHz
 															// there is 1 write + 1 read/write per motor current setting.
@@ -1936,7 +1940,18 @@ bool SmartDrivers::SetDriverMode(size_t driver, unsigned int mode) noexcept
 		return false;
 	}
 #endif
-	return driverStates[driver].SetDriverMode(mode);
+	const bool ret = driverStates[driver].SetDriverMode(mode);
+#if SUPPORT_CLOSED_LOOP
+	if (ret && driver == 0)
+	{
+		// Closed loop uses the TMC direct mode and needs the fast control-loop rate; other modes can run
+		// at the slow housekeeping rate. The main-board driver only switched the rate for phase stepping,
+		// so closed loop was left at the 500us default - far too slow and unstable.
+		const bool directMode = (mode == (unsigned int)DriverMode::direct || mode == (unsigned int)DriverMode::direct + 1);
+		DriversDirectSleepClocks = (directMode) ? DirectModeSpiSleepClocks : DefaultSpiSleepClocks;
+	}
+#endif
+	return ret;
 }
 
 DriverMode SmartDrivers::GetDriverMode(size_t driver) noexcept
