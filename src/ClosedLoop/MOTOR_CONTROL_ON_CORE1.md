@@ -62,10 +62,29 @@ the bench. The compiler enforces the separation we kept violating by hand.
      deliberate, single, audited call into `Move`. Everything FreeRTOS/CAN/flash/object-model is a
      compile error in the kernel TU (verified by test insertions of `vTaskDelay`/`CanMessageBuffer`).
 2. **Tuning/calibration state machine on core 0** — removes the last flash-write-from-core-1 path.
+
+   Implemented: the manoeuvre state machines in `Tuning.cpp` are unchanged; they are now sequenced by
+   a core-0 task (`ClosedLoop::TuningTaskLoop`, one `PerformTune()` step per millisecond — half the
+   pre-kernel 2 kHz step rate, which only makes the sweep gentler) with the kernel in `directCommand`
+   mode. `ClosedLoop::SetMotorPhase` routes through the block's command group when the kernel owns the
+   motor, and directly to the TMC staging otherwise (kernel idle / core 1 parked). Manoeuvre first
+   iterations park core 1 around encoder-state mutation (LUT/data-collection clears).
+   Bench-validated: M569.6 V2 full calibration succeeds (~40 s), persists through reboot, and the
+   kernel is handed back to closed loop afterwards.
+
 3. **Fold in open-loop step generation** — move `Move::Interrupt`/`CalcNextStepTime` stepping onto core 1
    as the `openLoopStep` mode; core 1 becomes the sole owner of motor output and motor position. (Bigger,
    more core-0-entangled; deferred until the closed-loop pattern is proven.)
 4. **Streaming + reporting**, then **validate + data-driven compare** of core-0 vs core-1 builds.
+
+   Streaming implemented (done before staging 3, which is independent): the kernel packs M569.5
+   samples straight into the shared `SampleBuffer` — the same single-producer(core 1)/single-consumer
+   (core 0) arrangement the pre-kernel loop used — in the exact pre-kernel wire order; only
+   arming/progress crosses the block, and `ClosedLoop::ServiceKernelSampling` (from `Move::Spin`)
+   mirrors progress into the transmission state machine. On-next-move captures trigger from the
+   kernel's trajectory query; tuning-move captures are started by the tuning task at sweep start
+   (the pre-kernel version started them 5 ms before the first tuning step; that pre-roll is lost).
+   Bench-validated: immediate and on-move captures produce correct CSVs via the main board.
 
 ## Kept from the current core-1 work
 

@@ -316,6 +316,7 @@ void Move::Spin() noexcept
 	SmartDrivers::Spin(powered);
 #if TMC_ON_CORE1
 	ClosedLoop::ServiceDeferredNotifications();				// perform notifications the core-1 control loop deferred to us
+	dms[0].closedLoopControl.ServiceKernelSampling();		// mirror the kernel's M569.5 sampling progress (single closed-loop driver on TMC_ON_CORE1 boards)
 #endif
 # else
 	SmartDrivers::Spin(true);

@@ -108,9 +108,13 @@ static Task<DataCollectionTaskStackWords> *dataTransmissionTask = nullptr;			// 
 // core 0 and performs the real notify. Level-triggered: repeated sets before a drain collapse to one.
 static volatile bool deferredDriverFault = false;
 static volatile bool deferredDataTransmit = false;
-static volatile bool deferredCalibrationReady = false;
 #endif
 static Task<EncoderCalibrationTaskStackWords> *encoderCalibrationTask = nullptr;	// Encoder calibration task - handles calibrating the encoder in the background
+
+#if TMC_ON_CORE1
+constexpr size_t TuningTaskStackWords = 300;						// stack for the tuning sequencer task
+static Task<TuningTaskStackWords> *tuningTask = nullptr;			// Tuning task - sequences tuning manoeuvres by driving the core-1 kernel's direct-command mode
+#endif
 
 extern "C" [[noreturn]] void DataTransmissionTaskEntry(void *param) noexcept
 {
@@ -121,6 +125,13 @@ extern "C" [[noreturn]] void EncoderCalibrationTaskEntry(void *param) noexcept
 {
 	((ClosedLoop*)param)->EncoderCalibrationTaskLoop();
 }
+
+#if TMC_ON_CORE1
+extern "C" [[noreturn]] void TuningTaskEntry(void *param) noexcept
+{
+	((ClosedLoop*)param)->TuningTaskLoop();
+}
+#endif
 
 // Helper function to convert a time period (expressed in StepTimer::Ticks) to ms
 static inline float TickPeriodToMillis(StepTimer::Ticks tickPeriod) noexcept
@@ -159,6 +170,20 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 	coilA = (int16_t)lrintf(cosine * magnitude);
 	coilB = (int16_t)lrintf(sine * magnitude);
 
+#if TMC_ON_CORE1
+	if (motorBlock.mode == MotorMode::directCommand)
+	{
+		// The core-1 kernel owns the TMC coil staging: hand it the command through the block.
+		// This is the tuning sequencer's path (it always runs with the kernel in directCommand mode).
+		motorBlock.commandSeq = motorBlock.commandSeq + 1;			// odd: update in progress
+		motorBlock.commandedPhase = phase;
+		motorBlock.commandedCurrentFraction = magnitude;
+		motorBlock.commandSeq = motorBlock.commandSeq + 1;			// even: consistent
+		return;
+	}
+	// Otherwise the kernel is idle or core 1 is parked (the closed-loop mode transitions), so there is
+	// no concurrent writer and we can stage the coil currents directly, as the pre-kernel code did.
+#endif
 # if (SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI) && SINGLE_DRIVER
 	SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
 # else
@@ -212,6 +237,7 @@ void ClosedLoop::InitInstance() noexcept
 
 #if TMC_ON_CORE1
 	PublishControlParameters(true);						// give the core-1 kernel the default gains and thresholds
+	motorBlock.sampleBuffer = &sampleBuffer;			// where the kernel packs diagnostic samples (M569.5)
 #endif
 }
 
@@ -503,15 +529,21 @@ GCodeResult ClosedLoop::ProcessM569Point4(CanMessageGenericParser& parser, const
 
 GCodeResult ClosedLoop::ProcessM569Point5(const CanMessageStartClosedLoopDataCollection& msg, const StringRef& reply) noexcept
 {
-#if TMC_ON_CORE1
-	reply.copy("closed loop data collection is not yet available with motor control on core 1");
-	return GCodeResult::error;
-#else
 	if (encoder == nullptr)
 	{
 		reply.copy("No encoder has been configured");
 		return GCodeResult::error;
 	}
+
+#if TMC_ON_CORE1
+	// The samples are collected by the core-1 kernel, which only runs the encoder in closed loop or
+	// direct-command (tuning) mode; there is no open-loop sampling on this build
+	if (currentMode == ClosedLoopMode::open && msg.movement == 0)
+	{
+		reply.copy("data collection requires closed loop mode when motor control is on core 1");
+		return GCodeResult::error;
+	}
+#endif
 
 	if (CollectingData())
 	{
@@ -554,21 +586,22 @@ GCodeResult ClosedLoop::ProcessM569Point5(const CanMessageStartClosedLoopDataCol
 		dataCollectionStartTicks = whenNextSampleDue = StepTimer::GetMovementTimerTicks();
 		samplingMode = (RecordingMode)requestedMode;				// do this one last, it triggers data collection
 
+#if TMC_ON_CORE1
+		// Hand the collection to the core-1 kernel, which packs the samples into the shared buffer;
+		// ServiceDeferredNotifications mirrors its progress back into this state machine
+		motorBlock.sampleFilter = filterRequested;
+		motorBlock.samplesRequested = samplesRequested;
+		motorBlock.sampleIntervalTicks = dataCollectionIntervalTicks;
+		motorBlock.sampleStartMode = (requestedMode == (uint8_t)RecordingMode::Immediate) ? 1 : 2;
+		motorBlock.sampleArmSeq = motorBlock.sampleArmSeq + 1;
+#endif
 		StartTuning(msg.movement);
 	}
 	return GCodeResult::ok;
-#endif	// TMC_ON_CORE1
 }
 
 GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const StringRef& reply) noexcept
 {
-#if TMC_ON_CORE1
-	// Tuning runs as a state machine inside the control cycle, which now lives in the core-1 kernel.
-	// Staging 2 of the redesign moves the tuning sequencer to core 0 driving the kernel's direct-command
-	// mode; until then tuning is unavailable on this build.
-	reply.copy("tuning is not yet available with motor control on core 1");
-	return GCodeResult::error;
-#else
 	if (encoder == nullptr)
 	{
 		reply.copy("no encoder configured");
@@ -585,7 +618,14 @@ GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const
 		}
 
 		// If we were checking the calibration, report the result
-		return (basicTuningDataReady) ? ProcessBasicTuningResult(reply) : ProcessCalibrationResult(reply);
+		const GCodeResult rslt = (basicTuningDataReady) ? ProcessBasicTuningResult(reply) : ProcessCalibrationResult(reply);
+#if TMC_ON_CORE1
+		if (rslt != GCodeResult::notFinished)
+		{
+			UpdateKernelMode();							// the result processing may have cleared (or set) tuning errors
+		}
+#endif
+		return rslt;
 	}
 
 	switch (desiredTuning)
@@ -640,7 +680,6 @@ GCodeResult ClosedLoop::ProcessM569Point6(CanMessageGenericParser& parser, const
 
 	StartTuning(desiredTuning);
 	return GCodeResult::notFinished;
-#endif	// TMC_ON_CORE1
 }
 
 bool ClosedLoop::OkayToSetDriverIdle() const noexcept
@@ -826,8 +865,84 @@ void ClosedLoop::StartTuning(uint8_t tuningMode) noexcept
 						: (tuningMode == 3) ? ENCODER_CALIBRATION_CHECK
 							: (tuningMode == 64) ? STEP_MANOEUVRE
 								: 0;
+#if TMC_ON_CORE1
+		// Tuning manoeuvres used to run inside the core-1 control cycle; they are now sequenced by a
+		// core-0 task driving the kernel's direct-command mode (see TuningTaskLoop)
+		if (tuning != 0)
+		{
+			CreateTuningTask();
+			if (motorBlock.mode == MotorMode::closedLoop)
+			{
+				desiredStepPhase = motorBlock.measuredStepPhase;	// start the sweep from the rotor's actual phase, which the kernel keeps fresh
+			}
+			tuningTask->Give(NotifyIndices::ClosedLoopDataTransmission);
+		}
+#endif
 	}
 }
+
+#if TMC_ON_CORE1
+
+// Recompute what the core-1 kernel should be doing from the closed-loop mode and the tuning state,
+// and make it reset its control state. Call after any transition that changes either.
+void ClosedLoop::UpdateKernelMode() noexcept
+{
+	motorBlock.mode = (currentMode == ClosedLoopMode::closed && tuningError == 0 && tuning == 0)
+						? MotorMode::closedLoop : MotorMode::idle;
+	motorBlock.resetSeq = motorBlock.resetSeq + 1;
+}
+
+// The tuning sequencer. Before the core-1 kernel existed, tuning manoeuvres ran as a state machine
+// inside the control cycle, one step per 0.5ms. Now they run here: one PerformTune() step per
+// millisecond tick, with the kernel in direct-command mode applying each commanded phase/current
+// within one 80us control cycle. Half the pre-kernel step rate, which only makes the sweep gentler;
+// the manoeuvre state machines themselves (Tuning.cpp) are unchanged.
+[[noreturn]] void ClosedLoop::TuningTaskLoop() noexcept
+{
+	for (;;)
+	{
+		TaskBase::TakeIndexed(NotifyIndices::ClosedLoopDataTransmission);
+		if (tuning != 0)
+		{
+			// The step manoeuvre only nudges the closed-loop target, so the kernel must stay in
+			// closedLoop mode for it; the sweep manoeuvres drive the coils directly.
+			const bool driveDirect = (tuning & (BASIC_TUNING_MANOEUVRE | ENCODER_CALIBRATION_MANOEUVRE | ENCODER_CALIBRATION_CHECK)) != 0;
+			if (driveDirect)
+			{
+				motorBlock.mode = MotorMode::directCommand;
+				SetMotorPhase(desiredStepPhase, 1.0);				// energise at the starting phase, ready for the sweep
+			}
+			delay(100);												// allow time for brake release and motor current buildup (was stepTicksBeforeTuning)
+			if (samplingMode == RecordingMode::OnNextMove)
+			{
+				// A data collection is armed to start on the next move (M569.5 with a tuning move):
+				// there is no closed-loop move to trigger on in direct-command mode, so start it now
+				motorBlock.sampleStartMode = 1;
+				motorBlock.sampleArmSeq = motorBlock.sampleArmSeq + 1;
+			}
+			while (tuning != 0)
+			{
+				PerformTune();
+				delay(1);											// one tuning step per tick
+			}
+			if (driveDirect)
+			{
+				UpdateKernelMode();									// hand the motor back to the kernel
+			}
+		}
+	}
+}
+
+void ClosedLoop::CreateTuningTask() noexcept
+{
+	if (tuningTask == nullptr)
+	{
+		tuningTask = new Task<TuningTaskStackWords>;
+		tuningTask->Create(TuningTaskEntry, "CLTune", this, TaskPriority::SpinPriority);
+	}
+}
+
+#endif	// TMC_ON_CORE1
 
 // Call this when we have stopped basic tuning movement and are ready to switch to closed loop control
 void ClosedLoop::FinishedBasicTuning() noexcept
@@ -844,11 +959,9 @@ void ClosedLoop::ReadyToCalibrate(bool store) noexcept
 	{
 		calibrationState = CalibrationState::dataReady;
 		tuningError |= TuningError::TuningOrCalibrationInProgress;			// to prevent movement in case we are re-calibrating
-#if TMC_ON_CORE1
-		deferredCalibrationReady = true;
-#else
+		// With the motor kernel on core 1, tuning runs in the core-0 tuning task, so we can notify
+		// directly (the deferred flag was only needed while this was reached from core-1 code)
 		encoderCalibrationTask->Give(NotifyIndices::ClosedLoopDataTransmission);
-#endif
 	}
 }
 
@@ -1375,10 +1488,34 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 		deferredDataTransmit = false;
 		if (dataTransmissionTask != nullptr) { dataTransmissionTask->Give(NotifyIndices::ClosedLoopDataTransmission); }
 	}
-	if (deferredCalibrationReady)
+}
+
+// Mirror the kernel's sample-streaming progress into the sampling state machine that the CAN
+// transmission task runs on (these fields used to be written directly by the core-1 control loop).
+// Called regularly from Move::Spin.
+void ClosedLoop::ServiceKernelSampling() noexcept
+{
+	const RecordingMode locMode = samplingMode;
+	if (locMode == RecordingMode::Immediate || locMode == RecordingMode::OnNextMove)
 	{
-		deferredCalibrationReady = false;
-		if (encoderCalibrationTask != nullptr) { encoderCalibrationTask->Give(NotifyIndices::ClosedLoopDataTransmission); }
+		samplesCollected = motorBlock.samplesCollected;
+		const MotorSampleState kernelState = motorBlock.sampleState;
+		if (locMode == RecordingMode::OnNextMove && kernelState >= MotorSampleState::recording)
+		{
+			samplingMode = RecordingMode::Immediate;			// the move (or tuning sweep) has started
+		}
+		if (kernelState == MotorSampleState::overflowed)
+		{
+			sampleBufferOverflowed = true;
+		}
+		if (kernelState >= MotorSampleState::complete && samplingMode == RecordingMode::Immediate)
+		{
+			samplingMode = RecordingMode::SendingData;			// all samples are in the buffer (or it overflowed): tell the sender to finish
+		}
+		if (dataTransmissionTask != nullptr)
+		{
+			dataTransmissionTask->Give(NotifyIndices::ClosedLoopDataTransmission);
+		}
 	}
 }
 #endif
@@ -1488,9 +1625,8 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 	// Hand the new state to the core-1 motor kernel. We are called with core 1 parked (the M569/M569.1
 	// paths take a Core1ParkLocker), so the kernel sees a consistent snapshot when it resumes.
 	motorBlock.encoder = encoder;
-	motorBlock.mode = (mode == ClosedLoopMode::closed && tuningError == 0) ? MotorMode::closedLoop : MotorMode::idle;
 	motorBlock.stall = motorBlock.preStall = motorBlock.faultPending = false;
-	motorBlock.resetSeq = motorBlock.resetSeq + 1;			// make the kernel clear its integrator, filters and latches
+	UpdateKernelMode();
 #endif
 
 	return true;

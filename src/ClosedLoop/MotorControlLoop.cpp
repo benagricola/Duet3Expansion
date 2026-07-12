@@ -23,6 +23,7 @@
 #include "Trigonometry.h"
 #include "DerivativeAveragingFilter.h"
 #include "Encoders/Encoder.h"
+#include "SampleBuffer.h"
 
 // Narrow shim into the TMC driver HAL. Declared here rather than by including the driver header
 // (which drags in the whole platform); the C++ mangled name makes a signature mismatch a link error.
@@ -54,6 +55,19 @@ namespace MotorControl
 	static float Kp = 0.0, Ki = 0.0, Kd = 0.0, Kv = 0.0, Ka = 0.0;
 	static float preErrorThreshold = 0.0, errorThreshold = 0.0;
 
+	// Last-cycle control values kept for diagnostic sampling (the pre-kernel code sampled the
+	// equivalent ClosedLoop instance fields)
+	static float lastPIDControlSignal = 0.0, lastPIDPTerm = 0.0, lastPIDDTerm = 0.0, lastPIDVTerm = 0.0, lastPIDATerm = 0.0;
+	static int16_t lastCoilA = 0, lastCoilB = 0;
+
+	// Sample-streaming state (latched from the block when sampleArmSeq changes)
+	static uint32_t lastSampleArmSeq = 0;
+	static uint16_t sampleFilter = 0;
+	static uint16_t samplesWanted = 0;
+	static uint32_t sampleIntervalTicks = 1;
+	static uint32_t whenNextSampleDue = 0;
+	static uint32_t sampleStartTicks = 0;
+
 	// Set the coil currents for the given phase and magnitude (0.0..1.0), and publish what we commanded
 	TIME_CRITICAL static void SetMotorPhase(uint16_t phase, float magnitude) noexcept
 	{
@@ -63,6 +77,87 @@ namespace MotorControl
 		const int16_t coilB = (int16_t)lrintf(sine * magnitude);
 		(void)SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
 		motorBlock.commandedStepPhase = phase;
+		lastCoilA = coilA;
+		lastCoilB = coilB;
+	}
+
+	// Diagnostic sample streaming, ported from ClosedLoop::CollectSample and the scheduling logic
+	// around it. The kernel packs samples straight into the shared SampleBuffer (the same
+	// single-producer/single-consumer arrangement the pre-kernel core-1 loop used); core 0 mirrors
+	// the progress fields into the transmission state machine.
+	TIME_CRITICAL static void SampleStream(uint32_t now, bool hasMove, Encoder *encoder, const MotionParameters& mParams, float positionError) noexcept
+	{
+		const uint32_t armSeq = motorBlock.sampleArmSeq;
+		if (armSeq != lastSampleArmSeq)
+		{
+			lastSampleArmSeq = armSeq;
+			sampleFilter = motorBlock.sampleFilter;
+			samplesWanted = motorBlock.samplesRequested;
+			sampleIntervalTicks = motorBlock.sampleIntervalTicks;
+			motorBlock.samplesCollected = 0;
+			switch (motorBlock.sampleStartMode)
+			{
+			case 1:
+				sampleStartTicks = whenNextSampleDue = now;
+				motorBlock.sampleState = MotorSampleState::recording;
+				break;
+			case 2:
+				motorBlock.sampleState = MotorSampleState::waitingForMove;
+				break;
+			default:
+				motorBlock.sampleState = MotorSampleState::idle;
+				break;
+			}
+		}
+
+		if (motorBlock.sampleState == MotorSampleState::waitingForMove && hasMove)
+		{
+			sampleStartTicks = whenNextSampleDue = now;
+			motorBlock.sampleState = MotorSampleState::recording;
+		}
+
+		if (motorBlock.sampleState == MotorSampleState::recording && (int32_t)(now - whenNextSampleDue) >= 0)
+		{
+			SampleBuffer *const buf = motorBlock.sampleBuffer;
+			if (buf == nullptr)
+			{
+				motorBlock.sampleState = MotorSampleState::idle;
+				return;
+			}
+			if (buf->IsFull())
+			{
+				motorBlock.sampleState = MotorSampleState::overflowed;			// tell core 0 to stop the collection
+				return;
+			}
+
+			// Pack the sample in exactly the order the pre-kernel CollectSample used (the wire format)
+			buf->PutF32((float)(now - sampleStartTicks) * StepTimer::StepClocksToMillis);	// always collect the timestamp
+			if (sampleFilter & CL_RECORD_RAW_ENCODER_READING) 	{ buf->PutI32(encoder->GetCurrentCount()); }
+			if (sampleFilter & CL_RECORD_CURRENT_MOTOR_STEPS) 	{ buf->PutF32((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount()); }
+			if (sampleFilter & CL_RECORD_TARGET_MOTOR_STEPS)  	{ buf->PutF32(mParams.position); }
+			if (sampleFilter & CL_RECORD_CURRENT_ERROR) 		{ buf->PutF32(positionError); }
+			if (sampleFilter & CL_RECORD_PID_CONTROL_SIGNAL)  	{ buf->PutF16(lastPIDControlSignal); }
+			if (sampleFilter & CL_RECORD_PID_P_TERM)  			{ buf->PutF16(lastPIDPTerm); }
+			if (sampleFilter & CL_RECORD_PID_I_TERM)  			{ buf->PutF16(PIDITerm); }
+			if (sampleFilter & CL_RECORD_PID_D_TERM)  			{ buf->PutF16(lastPIDDTerm); }
+			if (sampleFilter & CL_RECORD_PID_V_TERM)  			{ buf->PutF16(lastPIDVTerm); }
+			if (sampleFilter & CL_RECORD_PID_A_TERM)  			{ buf->PutF16(lastPIDATerm); }
+			if (sampleFilter & CL_RECORD_CURRENT_STEP_PHASE)  	{ buf->PutU16((uint16_t)encoder->GetCurrentPhasePosition()); }
+			if (sampleFilter & CL_RECORD_DESIRED_STEP_PHASE)  	{ buf->PutU16(motorBlock.commandedStepPhase); }
+			if (sampleFilter & CL_RECORD_PHASE_SHIFT)  			{ buf->PutU16(0); }
+			if (sampleFilter & CL_RECORD_COIL_A_CURRENT) 		{ buf->PutI16(lastCoilA); }
+			if (sampleFilter & CL_RECORD_COIL_B_CURRENT) 		{ buf->PutI16(lastCoilB); }
+			buf->FinishSample();
+
+			__asm volatile("dmb" ::: "memory");									// the sample data must be visible to core 0 before the count that publishes it
+			const uint16_t collected = motorBlock.samplesCollected + 1;
+			motorBlock.samplesCollected = collected;
+			if (collected == samplesWanted)
+			{
+				motorBlock.sampleState = MotorSampleState::complete;
+			}
+			whenNextSampleDue += sampleIntervalTicks;
+		}
 	}
 
 	// Refresh the local gain/threshold copies if core 0 has published a new set. Seqlock: retry once,
@@ -140,9 +235,10 @@ namespace MotorControl
 		// Evaluate the trajectory and compute the position error in full steps
 		const uint32_t now = StepTimer::ConvertLocalToMovementTime(cycleStartTime);
 		MotionParameters mParams;
+		bool hasMove = false;
 		if (mode == MotorMode::closedLoop)
 		{
-			(void)MotorControlGetTrajectory(now, mParams);
+			hasMove = MotorControlGetTrajectory(now, mParams);
 		}
 		else
 		{
@@ -197,6 +293,13 @@ namespace MotorControl
 			currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
 			SetMotorPhase(commandedStepPhase, currentFraction);
 
+			// Keep the control values for diagnostic sampling
+			lastPIDControlSignal = PIDControlSignal;
+			lastPIDPTerm = PIDPTerm;
+			lastPIDDTerm = PIDDTerm;
+			lastPIDVTerm = PIDVTerm;
+			lastPIDATerm = PIDATerm;
+
 			// Stall / pre-stall detection, ported from InstanceControlLoop
 			const float positionErr = fabsf(currentPositionError);
 			if (motorBlock.stall)
@@ -222,6 +325,8 @@ namespace MotorControl
 			}
 		}
 		motorBlock.currentFraction = currentFraction;
+
+		SampleStream(now, hasMove, encoder, mParams, currentPositionError);
 
 		// Statistics for the periodic report (core 0 reads and resets these)
 		const float absPositionError = fabsf(currentPositionError);

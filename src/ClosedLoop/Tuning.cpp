@@ -4,6 +4,9 @@
 #if SUPPORT_CLOSED_LOOP
 
 #include "Encoders/Encoder.h"
+#if TMC_ON_CORE1
+# include <Platform/Core1Runtime.h>		// Core1ParkLocker: these manoeuvres now run on core 0 and must park the kernel around encoder-state mutation
+#endif
 
 # if SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI
 #  include "Movement/StepperDrivers/TMC51xx.h"
@@ -100,6 +103,10 @@ bool ClosedLoop::BasicTuning(bool firstIteration) noexcept
 
 	if (firstIteration)
 	{
+#if TMC_ON_CORE1
+		// The core-1 kernel reads the encoder every cycle; park it while we mutate the encoder's state
+		Core1ParkLocker parkLocker;
+#endif
 		state = BasicTuningState::forwardInitial;
 		stepCounter = 0;
 		encoder->SetTuningBackwards(false);
@@ -236,6 +243,11 @@ bool ClosedLoop::EncoderCalibration(bool firstIteration) noexcept
 
 	if (firstIteration)
 	{
+#if TMC_ON_CORE1
+		// The core-1 kernel reads the encoder (and applies its LUT) every cycle; park it while we
+		// clear the data collection, the LUT and the calibration polarity
+		Core1ParkLocker parkLocker;
+#endif
 		// Set up some variables
 		positionsPerRev = ClosedLoop::encoder->GetPhasePositionsPerRev();
 

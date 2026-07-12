@@ -98,6 +98,10 @@ public:
 #if TMC_ON_CORE1
 	static void ServiceDeferredNotifications() noexcept;		// core 0 drains FreeRTOS notifies deferred by the core-1 loop
 	void PublishControlParameters(bool resetControl) noexcept;	// hand the PID gains/thresholds to the core-1 motor kernel
+	void UpdateKernelMode() noexcept;							// recompute the kernel's MotorMode from the closed-loop mode + tuning state
+	void CreateTuningTask() noexcept;
+	[[noreturn]] void TuningTaskLoop() noexcept;				// sequences tuning manoeuvres by driving the kernel's direct-command mode
+	void ServiceKernelSampling() noexcept;						// mirror the kernel's M569.5 sampling progress into the transmission state machine
 #endif
 
 	// Functions run by tasks

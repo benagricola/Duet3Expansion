@@ -32,6 +32,8 @@
  *   gain set, a direct command) use the sequence-lock counters so the reader retries on a mid-update
  *   snapshot - lock-free, no FreeRTOS. The statistics accumulators are written by core 1 and
  *   read-and-reset by core 0; the races there lose at most one cycle's contribution (diagnostic only).
+ *   Diagnostic samples go straight into the shared SampleBuffer, which was already designed as
+ *   single-producer (the control cycle, on core 1) / single-consumer (the transmission task, core 0).
  *   This header pulls in nothing from FreeRTOS/flash so it is safe to include from either side.
  */
 
@@ -53,6 +55,17 @@ struct MotionParameters
 #if RPXXXX && TMC_ON_CORE1
 
 class Encoder;
+class SampleBuffer;
+
+// Kernel-side sample-streaming state, published in the block for core 0 to mirror (see below)
+enum class MotorSampleState : uint8_t
+{
+	idle = 0,
+	waitingForMove,		// armed; recording starts when a movement command begins executing
+	recording,
+	complete,			// requested number of samples collected
+	overflowed,			// the sample buffer filled before the requested number was collected
+};
 
 // What the servo does each cycle, chosen by core 0.
 enum class MotorMode : uint32_t
@@ -123,12 +136,19 @@ struct MotorControlBlock
 	volatile uint32_t minCycleRuntime = 0xFFFFFFFF;				// step clocks spent in the cycle
 	volatile uint32_t maxCycleRuntime = 0;
 
-	// ---- Sample ring: single-producer (core 1) / single-consumer (core 0) --------------------------
-	// Used only while streaming diagnostic samples (staging 4). Core 1 pushes, core 0 drains and sends over CAN.
-	static constexpr uint32_t SampleRingSize = 256;				// power of two
-	volatile uint32_t sampleHead = 0;							// core 1 increments after writing
-	volatile uint32_t sampleTail = 0;							// core 0 increments after reading
-	volatile uint32_t sampleRing[SampleRingSize] = { };			// packed sample words (format agreed out of band)
+	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
+	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel
+	// control loop did (SampleBuffer was already single-producer core 1 / single-consumer core 0);
+	// only the arming/progress state crosses through the block. Core 0 mirrors the progress into the
+	// ClosedLoop sampling state machine that the CAN transmission task runs on.
+	SampleBuffer *volatile sampleBuffer = nullptr;				// set once by core 0 at init; the kernel does not sample while it is null
+	volatile uint32_t sampleArmSeq = 0;							// bumped by core 0 to (re)arm or stop; the kernel latches the group below when it changes
+	volatile uint16_t sampleFilter = 0;							// CL_RECORD_* bitmask (from Duet3Common.h)
+	volatile uint16_t samplesRequested = 0;
+	volatile uint32_t sampleIntervalTicks = 1;					// step clocks between samples
+	volatile uint8_t sampleStartMode = 0;						// 0 = stop, 1 = start now, 2 = start on the next movement command
+	volatile uint16_t samplesCollected = 0;						// kernel: samples written to the buffer so far
+	volatile MotorSampleState sampleState = MotorSampleState::idle;	// kernel: progress/completion
 };
 
 // The one shared instance lives in ordinary RAM (not the flash-cached region). Defined in MotorControlLoop.cpp.

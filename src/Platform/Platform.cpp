@@ -1163,7 +1163,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v14c motor kernel + xdir trace\n");
+			debugPrintf("Bench: v16 sample streaming from kernel\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
