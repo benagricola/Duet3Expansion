@@ -1163,7 +1163,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v20 shared tuning moves\n");
+			debugPrintf("Bench: v30 core1 steptest\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
@@ -1220,6 +1220,36 @@ void Platform::Spin()
 			String<StringLength256> reply;
 			ClosedLoop::BenchLiveProbe(reply.GetRef());
 			debugPrintf("%s\n", reply.c_str());
+		}
+		else if (c == 'Y')
+		{
+			// USB bench diagnostic: as 'S' but the pulses are emitted by CORE 1 (via the motor kernel)
+			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
+			motorBlock.stepPollMask = 1u << (StepPins[0] & 31);
+			motorBlock.stepTestRequest = 1;
+			const uint32_t t0 = millis();
+			while (motorBlock.stepTestRequest != 2 && millis() - t0 < 1000) { delay(1); }
+			delay(3);
+			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
+			debugPrintf("STEPTEST core1: done=%u, mspos %u -> %u\n", motorBlock.stepTestRequest, msposBefore, msposAfter);
+		}
+		else if (c == 'S')
+		{
+			// USB bench diagnostic: pulse the step pin 3200 times from THIS core (core 0) at ~10us
+			// spacing and report the TMC microstep counter before/after, to discriminate pin/chip
+			// problems from cross-core GPIO problems when steps go missing
+			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
+			const uint32_t mask = 1u << (StepPins[0] & 31);
+			for (unsigned int i = 0; i < 3200; ++i)
+			{
+				sio_hw->gpio_set = mask;
+				delayMicroseconds(5);
+				sio_hw->gpio_clr = mask;
+				delayMicroseconds(5);
+			}
+			delay(3);
+			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
+			debugPrintf("STEPTEST core0: 3200 pulses on mask 0x%" PRIx32 ", mspos %u -> %u\n", mask, msposBefore, msposAfter);
 		}
 		else if (c == 'A')
 		{

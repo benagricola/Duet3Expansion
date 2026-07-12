@@ -167,6 +167,12 @@ struct MotorControlBlock
 	volatile MotorSweepState sweepState = MotorSweepState::idle;	// written by the kernel
 	volatile uint32_t sweepIterations = 0;						// written by the kernel: manoeuvre steps executed (diagnostics)
 
+	// Open-loop stepping (MotorMode::openLoopStep) diagnostics, written by the step poll on core 1
+	volatile uint32_t stepPollCalls = 0;						// times the poll ran (proves the hook is alive)
+	volatile uint32_t stepsEmitted = 0;							// step pulses generated
+	volatile uint32_t stepPollMask = 0;							// the driversCurrentlyUsed mask at the last pulse (diagnostic)
+	volatile uint8_t stepTestRequest = 0;						// bench: 1 = core 0 asks the kernel to emit 3200 wide test pulses on stepPollMask; kernel sets 2 when done
+
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel
 	// control loop did (SampleBuffer was already single-producer core 1 / single-consumer core 0);
@@ -190,10 +196,18 @@ extern MotorControlBlock motorBlock;
 // Returns true if a movement command is current. Runs on core 1 under the cross-core motion lock.
 bool MotorControlGetTrajectory(uint32_t when, MotionParameters& mParams) noexcept;
 
+// Open-loop step generation for MotorMode::openLoopStep, implemented by the motion system (Move.cpp):
+// emit any due step and advance the step state machine. Runs on core 1, polled continuously.
+void MotorControlStepPoll() noexcept;
+
 namespace MotorControl
 {
 	// One control cycle; called from the core-1 TMC loop between SPI transfers.
 	void Cycle() noexcept;
+
+	// Continuous poll hook registered with Core1Runtime: generates open-loop steps when the kernel
+	// owns stepping, otherwise does nothing.
+	void KernelYieldPoll() noexcept;
 }
 
 #endif	// RPXXXX && TMC_ON_CORE1

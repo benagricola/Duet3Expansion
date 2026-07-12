@@ -41,6 +41,12 @@ namespace Core1Runtime
 	// deadline. Called only from core-1 code, between control cycles.
 	void Yield(uint32_t untilStepTicks) noexcept;
 
+	// Register a function to be polled continuously from Yield's wait loop (RAM-resident, core 1,
+	// microsecond-scale granularity; not called while parked). Used by the motor kernel to generate
+	// open-loop steps. Pass nullptr to remove.
+	typedef void (*YieldPollFn)() noexcept;
+	void SetYieldPoll(YieldPollFn fn) noexcept;
+
 	bool Park() noexcept;							// ask core 1 to park in its idle loop; returns true when it acknowledged (bounded wait). Nestable.
 	void Resume() noexcept;
 

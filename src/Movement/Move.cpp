@@ -628,6 +628,12 @@ void Move::StepDrivers(uint32_t now) noexcept
 		return;
 	}
 # endif
+# if TMC_ON_CORE1
+	if (steppingOnCore1)
+	{
+		return;												// the core-1 kernel owns step generation (StepPollOnCore1)
+	}
+# endif
 
 	// Determine whether the driver is due for stepping, overdue, or will be due very shortly
 	if (dms[0].state >= DMState::firstMotionState && (int32_t)(dms[0].nextStepTime - now) <= (int32_t)MoveTiming::MinInterruptInterval)	// if the next step is due
@@ -2336,6 +2342,57 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 TIME_CRITICAL bool MotorControlGetTrajectory(uint32_t when, MotionParameters& mParams) noexcept
 {
 	return moveInstance->GetCurrentMotion(0, when, mParams);
+}
+
+// Open-loop step generation for the core-1 motor kernel (declared in MotorControlBlock.h): polled
+// continuously from the core-1 host loop while the kernel owns stepping (MotorMode::openLoopStep).
+// Equivalent to the step ISR's job, but polling makes interrupt scheduling and hiccups unnecessary:
+// an overdue step is simply emitted on the next poll, and the poll rate (a few MHz) is far above any
+// commandable step rate. The unlocked pre-check keeps the cross-core lock uncontended except when a
+// step is actually due; its races are benign because the state it reads only becomes actionable
+// under the lock, where it is re-checked.
+TIME_CRITICAL void MotorControlStepPoll() noexcept
+{
+	moveInstance->StepPollOnCore1();
+}
+
+TIME_CRITICAL void Move::StepPollOnCore1() noexcept
+{
+# if !SINGLE_DRIVER
+#  error Core-1 step generation is only implemented for single-driver boards
+# endif
+	motorBlock.stepPollCalls = motorBlock.stepPollCalls + 1;
+	if (dms[0].state >= DMState::firstMotionState)											// unlocked pre-check
+	{
+		const uint32_t now = StepTimer::GetMovementTimerTicks();
+		if ((int32_t)(dms[0].nextStepTime - now) <= (int32_t)MoveTiming::MinInterruptInterval)
+		{
+			MotionCriticalSectionLocker lock;
+			// Re-check under the lock, then step exactly as the ISR path does
+			if (dms[0].state >= DMState::firstMotionState
+				&& (int32_t)(dms[0].nextStepTime - StepTimer::GetMovementTimerTicks()) <= (int32_t)MoveTiming::MinInterruptInterval)
+			{
+				StepDriversHigh(dms[0].driversCurrentlyUsed);								// generate the step
+				PrepareForNextSteps(now);
+				// Pad the step pulse to at least ~1us. In the ISR path the interrupt overhead does
+				// this implicitly, but here a cache-hot PrepareForNextSteps can complete in ~200ns,
+				// which the TMC2240's filtered STEP input (GCONF multistep_filt) does not register.
+				for (unsigned int i = 0; i < 200; ++i)
+				{
+					__asm volatile("nop");
+				}
+				StepDriversLow();															// set the step pin low
+				if (dms[0].directionChanged)
+				{
+					dms[0].directionChanged = false;
+					SetDirection(dms[0].direction);
+				}
+				motorBlock.stepsEmitted = motorBlock.stepsEmitted + 1;
+				motorBlock.stepPollMask = dms[0].driversCurrentlyUsed;					// diagnostic: the pin mask actually pulsed
+				motorBlock.motorPosition = dms[0].currentMotorPosition;					// the openLoopStep position output the design doc specifies
+			}
+		}
+	}
 }
 #endif
 

@@ -20,6 +20,7 @@
 #if RPXXXX && TMC_ON_CORE1
 
 #include <Movement/StepTimer.h>
+#include <hardware/structs/sio.h>
 #include "Trigonometry.h"
 #include "DerivativeAveragingFilter.h"
 #include "Encoders/Encoder.h"
@@ -262,16 +263,42 @@ namespace MotorControl
 
 
 
+	// Continuous poll hook (registered with Core1Runtime by ClosedLoop::InitInstance): open-loop step
+	// generation. In openLoopStep mode this runs at the host loop's poll rate, microseconds apart.
+	TIME_CRITICAL void KernelYieldPoll() noexcept
+	{
+		if (motorBlock.stepTestRequest == 1)
+		{
+			// Bench diagnostic: emit wide test pulses from THIS core so cross-core GPIO problems can
+			// be discriminated from step-generation problems (mirrors the core-0 'S' test)
+			const uint32_t mask = motorBlock.stepPollMask;
+			for (unsigned int n = 0; n < 3200; ++n)
+			{
+				sio_hw->gpio_set = mask;
+				for (unsigned int i = 0; i < 1000; ++i) { __asm volatile("nop"); }
+				sio_hw->gpio_clr = mask;
+				for (unsigned int i = 0; i < 1000; ++i) { __asm volatile("nop"); }
+			}
+			motorBlock.stepTestRequest = 2;
+		}
+		if (motorBlock.mode == MotorMode::openLoopStep)
+		{
+			MotorControlStepPoll();
+		}
+	}
+
 	// One control cycle. Ported from ClosedLoop::InstanceControlLoop + ControlMotorCurrents
 	// (ClosedLoopMode::closed branch); see the file header comment.
 	TIME_CRITICAL void Cycle() noexcept
 	{
 		const MotorMode mode = motorBlock.mode;
 		Encoder *const encoder = motorBlock.encoder;
-		if (mode == MotorMode::idle || encoder == nullptr)
+		if (mode == MotorMode::idle || mode == MotorMode::openLoopStep || encoder == nullptr)
 		{
-			prevCycleTimeValid = false;								// don't count the idle gap as a cycle interval
-			return;													// core 0 owns the encoder and the motor while we are idle
+			// idle: core 0 owns the encoder and the motor. openLoopStep: stepping happens in
+			// KernelYieldPoll, and core 0 owns the encoder (the kernel must not read it in open loop)
+			prevCycleTimeValid = false;								// don't count the gap as a cycle interval
+			return;
 		}
 
 		// Cycle timing statistics (these are the loop-health numbers M122 reports)

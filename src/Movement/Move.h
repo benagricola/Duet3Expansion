@@ -174,6 +174,11 @@ public:
 	void ClosedLoopDiagnostics(size_t driver, const StringRef& reply) noexcept;
 	void ResetPhaseStepMonitoringVariables() noexcept;
 	void ResetPhaseStepControlLoopCallTime() noexcept;
+
+# if TMC_ON_CORE1
+	void SetSteppingOnCore1(bool ownedByCore1) noexcept { steppingOnCore1 = ownedByCore1; }	// called with core 1 parked (mode transitions)
+	void StepPollOnCore1() noexcept SPEED_CRITICAL;					// generate any due open-loop step; polled continuously from the core-1 host loop
+# endif
 #endif
 
 private:
@@ -287,6 +292,11 @@ private:
 	DriveMovement *phaseStepDMs = nullptr;
 # endif
 	uint32_t allDriverBits = 0;
+#endif
+
+#if TMC_ON_CORE1
+	volatile bool steppingOnCore1 = false;				// true when the core-1 motor kernel owns open-loop step generation (MotorMode::openLoopStep);
+														// gates the step interrupt scheduling and the ISR's stepping. Written with core 1 parked.
 #endif
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
@@ -412,6 +422,9 @@ inline __attribute__((always_inline)) bool Move::ScheduleNextStepInterrupt() noe
 	if (
 # if SUPPORT_CLOSED_LOOP
 		!dms[0].closedLoopControl.IsClosedLoopEnabled() &&
+# endif
+# if TMC_ON_CORE1
+		!steppingOnCore1 &&							// the core-1 kernel polls the step deadlines itself; no interrupts wanted
 # endif
 		dms[0].state >= DMState::firstMotionState
 	   )

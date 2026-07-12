@@ -76,6 +76,21 @@ the bench. The compiler enforces the separation we kept violating by hand.
 3. **Fold in open-loop step generation** — move `Move::Interrupt`/`CalcNextStepTime` stepping onto core 1
    as the `openLoopStep` mode; core 1 becomes the sole owner of motor output and motor position. (Bigger,
    more core-0-entangled; deferred until the closed-loop pattern is proven.)
+
+   Implemented as a busy-poll (single-driver boards only): `Core1Runtime::Yield` gains a continuous
+   poll hook; the kernel's `KernelYieldPoll` calls `Move::StepPollOnCore1()` (a shim like the
+   trajectory one) whenever the mode is `openLoopStep`. The poll does an unlocked pre-check of
+   `dms[0].state`/`nextStepTime` and only takes the cross-core motion lock when a step is due, then
+   steps exactly as the ISR path does (`StepDriversHigh` → `PrepareForNextSteps` → `StepDriversLow`).
+   Polling removes the whole interrupt-scheduling handshake and the hiccup mechanism: an overdue step
+   is emitted on the next poll, and the poll rate is far above any commandable step rate. The core-0
+   step ISR is gated out via `Move::steppingOnCore1`, set (with core 1 parked) by the kernel-mode
+   recompute, which now maps closed-loop-off to `openLoopStep` rather than `idle`. The step-advance
+   code (`PrepareForNextSteps`/`CalcNextStepTime`) remains flash-resident: acceptable on core 1
+   because the park machinery already pauses the poll around core-0 flash writes, and step timing
+   tolerates XIP-cache jitter (unlike the closed-loop cycle). Note that stepping only moves to core 1
+   after the first M569 D-mode command creates the closed-loop/kernel state; a board that never
+   receives one keeps the core-0 ISR.
 4. **Streaming + reporting**, then **validate + data-driven compare** of core-0 vs core-1 builds.
 
    Streaming implemented (done before staging 3, which is independent): the kernel packs M569.5

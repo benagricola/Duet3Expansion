@@ -238,6 +238,7 @@ void ClosedLoop::InitInstance() noexcept
 #if TMC_ON_CORE1
 	PublishControlParameters(true);						// give the core-1 kernel the default gains and thresholds
 	motorBlock.sampleBuffer = &sampleBuffer;			// where the kernel packs diagnostic samples (M569.5)
+	Core1Runtime::SetYieldPoll(MotorControl::KernelYieldPoll);	// open-loop step generation (runs before core 1 is launched, so no race)
 #endif
 }
 
@@ -891,10 +892,12 @@ void ClosedLoop::StartTuning(uint8_t tuningMode) noexcept
 // and make it reset its control state. Call after any transition that changes either.
 void ClosedLoop::UpdateKernelMode() noexcept
 {
-	motorBlock.mode = (tuningError != 0 || tuning != 0) ? MotorMode::idle
-						: (currentMode == ClosedLoopMode::closed) ? MotorMode::closedLoop
-							: (currentMode == ClosedLoopMode::assistedOpen) ? MotorMode::assistedOpen
-								: MotorMode::idle;
+	const MotorMode newMode = (tuningError != 0 || tuning != 0) ? MotorMode::idle
+								: (currentMode == ClosedLoopMode::closed) ? MotorMode::closedLoop
+									: (currentMode == ClosedLoopMode::assistedOpen) ? MotorMode::assistedOpen
+										: MotorMode::openLoopStep;		// open loop: the kernel polls the step deadlines (staging 3)
+	motorBlock.mode = newMode;
+	moveInstance->SetSteppingOnCore1(newMode == MotorMode::openLoopStep);	// gates the core-0 step ISR out while the kernel steps
 	motorBlock.resetSeq = motorBlock.resetSeq + 1;
 }
 
@@ -1513,10 +1516,12 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	// XDIRECT staging state so a break anywhere in the coil-current path is visible.
 	uint32_t xdFrames, xdPhase, gconf;
 	SmartDrivers::GetBenchXdirectDiag(xdFrames, xdPhase, gconf);
-	reply.printf("PLIVE enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32,
+	reply.printf("PLIVE mode=%u enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32 " poll=%" PRIu32 " steps=%" PRIu32 " mask=0x%" PRIx32,
+				(unsigned int)motorBlock.mode,
 				motorBlock.encoderCount, (double)motorBlock.positionError, (double)motorBlock.currentFraction,
 				motorBlock.commandedStepPhase, motorBlock.measuredStepPhase, (unsigned int)motorBlock.encoderReadOk,
-				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations);
+				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations,
+				motorBlock.stepPollCalls, motorBlock.stepsEmitted, motorBlock.stepPollMask);
 #else
 	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
 				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);

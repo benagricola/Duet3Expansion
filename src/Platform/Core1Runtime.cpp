@@ -112,6 +112,13 @@ namespace Core1Runtime
 		return acknowledged;
 	}
 
+	static volatile YieldPollFn yieldPoll = nullptr;		// polled continuously from Yield's wait loop (e.g. open-loop step generation)
+
+	void SetYieldPoll(YieldPollFn fn) noexcept
+	{
+		yieldPoll = fn;
+	}
+
 	// Service housekeeping until the deadline. This is the only place core 1 parks, so a worker entry
 	// (e.g. the TMC control loop) must call it between cycles. Bare metal: no scheduler on this core.
 	TIME_CRITICAL void Yield(uint32_t untilStepTicks) noexcept
@@ -119,6 +126,13 @@ namespace Core1Runtime
 		do
 		{
 			++heartbeat;
+			{
+				const YieldPollFn poll = yieldPoll;
+				if (poll != nullptr)
+				{
+					poll();									// e.g. generate open-loop steps; not called while parked (see below)
+				}
+			}
 			if (parkRequested)
 			{
 				parked = true;
