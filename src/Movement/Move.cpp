@@ -314,6 +314,9 @@ void Move::Spin() noexcept
 #if HAS_SMART_DRIVERS
 # if HAS_VOLTAGE_MONITOR
 	SmartDrivers::Spin(powered);
+#if TMC_ON_CORE1
+	ClosedLoop::ServiceDeferredNotifications();				// perform notifications the core-1 control loop deferred to us
+#endif
 # else
 	SmartDrivers::Spin(true);
 # endif

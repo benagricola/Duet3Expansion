@@ -99,6 +99,9 @@ public:
 	static void BenchCaptureArm() noexcept;							// USB 'A' arm per-cycle capture
 	static void BenchCaptureDump() noexcept;							// USB 'G' dump per-cycle capture
 #endif
+#if TMC_ON_CORE1
+	static void ServiceDeferredNotifications() noexcept;		// core 0 drains FreeRTOS notifies deferred by the core-1 loop
+#endif
 
 	// Functions run by tasks
 	[[noreturn]] void DataTransmissionTaskLoop() noexcept;
