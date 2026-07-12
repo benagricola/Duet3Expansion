@@ -53,7 +53,9 @@ constexpr uint32_t FlashBlockSize = 0x00004000;					// the erase size we assume 
 constexpr uint32_t FlashBlockSize = 0x00004000;					// the erase size we assume for flash, and the bootloader size (16K)
 #elif RPXXXX
 constexpr uint32_t FlashBlockSize = 0x00001000;					// the erase size we assume for flash, and the bootloader size (4K)
-constexpr uint32_t MaxFirmwareSize = 190*1024;					// Max size of firmware we can flash
+constexpr uint32_t MaxFirmwareSize = 256*1024;					// Max size of firmware we can flash. The whole image is buffered in RAM during an
+																// update; the RP2350 has 520K so this leaves ample headroom. The old 190K limit was
+																// outgrown by the firmware (the updater then error-8 loops on every attempt)
 struct UF2_Block
 {
 	// 32 byte header
@@ -84,7 +86,10 @@ struct UF2_Block
 
 #include <syscalls.h>
 
-constexpr uint32_t BlockReceiveTimeout = 2000;					// bootloader block receive timeout milliseconds
+constexpr uint32_t BlockReceiveTimeout = 1000;					// firmware/bootloader block receive timeout in milliseconds. Long enough for the main board
+																// to fetch a chunk from SD and stream it; short enough that a lost-frame recovery does not
+																// dominate the update time (it used to be 2000ms, which made every recovery cost 2s)
+constexpr unsigned int MaxZeroByteRetries = 10;					// how many times to re-issue a request that got no response at all before giving up
 
 constexpr uint8_t memPattern = 0xA5;
 
@@ -366,15 +371,22 @@ static void RequestFirmwareBlock(uint32_t fileOffset, uint32_t numBytes, CanMess
 	CanInterface::Send(&buf);
 }
 
-// Get a buffer of data from the host
+// Get a buffer of data from the host.
+// We fetch the 4K flash block in sub-chunks rather than in one request: the main board streams the
+// requested length as one burst of CAN frames, and on this board the receive path is an SPI CAN chip
+// drained by polling, so a 4K (~74 frame) burst overflows its FIFO partway through. The lost tail
+// then costs a BlockReceiveTimeout + re-request for nearly every block, which is what made firmware
+// updates take minutes instead of seconds. A sub-chunk small enough to fit the chip buffering makes
+// the transfer self-paced by this end and lossless.
+constexpr uint32_t FirmwareUpdateChunkSize = 1024;
 static FirmwareFlashErrorCode GetBlock(uint32_t startingOffset, uint32_t& fileSize, uint8_t *blockBuffer)
 {
 	CanMessageBuffer buf;
-//debugPrintf("ask for block %d\n", startingOffset);
-	RequestFirmwareBlock(startingOffset, FlashBlockSize, buf);	// ask for 4K from the starting offset
-//debugPrintf("After request\n");
+	RequestFirmwareBlock(startingOffset, FirmwareUpdateChunkSize, buf);		// ask for the first sub-chunk from the starting offset
 	uint32_t whenStartedWaiting = millis();
 	uint32_t bytesReceived = 0;
+	uint32_t bytesRequested = FirmwareUpdateChunkSize;
+	unsigned int zeroByteRetries = 0;
 	bool done = false;
 	do
 	{
@@ -417,6 +429,12 @@ static FirmwareFlashErrorCode GetBlock(uint32_t startingOffset, uint32_t& fileSi
 							fileSize = response.fileLength;
 							done = true;
 						}
+						else if (bytesReceived >= bytesRequested)
+						{
+							// Completed a sub-chunk: ask for the next one
+							bytesRequested = min<uint32_t>(bytesRequested + FirmwareUpdateChunkSize, FlashBlockSize);
+							RequestFirmwareBlock(startingOffset + bytesReceived, bytesRequested - bytesReceived, buf);
+						}
 					}
 					whenStartedWaiting = millis();
 				}
@@ -424,12 +442,22 @@ static FirmwareFlashErrorCode GetBlock(uint32_t startingOffset, uint32_t& fileSi
 		}
 		else if (millis() - whenStartedWaiting > BlockReceiveTimeout)
 		{
-			//debugPrintf("Timeout\n");
 			if (bytesReceived == 0)
 			{
-				return FirmwareFlashErrorCode::blockReceiveTimeout;
+				// No response at all: the main board's first response to a request can be slow (SD
+				// access, its own polling cadence), so re-issue the request a few times before failing
+				if (++zeroByteRetries > MaxZeroByteRetries)
+				{
+					return FirmwareFlashErrorCode::blockReceiveTimeout;
+				}
+				debugPrintf("Block %" PRIu32 ": no response, retry %u\n", startingOffset, zeroByteRetries);
+				RequestFirmwareBlock(startingOffset, bytesRequested, buf);
 			}
-			RequestFirmwareBlock(startingOffset + bytesReceived, FlashBlockSize - bytesReceived, buf);		// ask for 4K from the starting offset
+			else
+			{
+				debugPrintf("Block %" PRIu32 ": timeout at %" PRIu32 "/%" PRIu32 " bytes\n", startingOffset, bytesReceived, bytesRequested);
+				RequestFirmwareBlock(startingOffset + bytesReceived, bytesRequested - bytesReceived, buf);	// re-request the missing remainder of the current sub-chunk
+			}
 			whenStartedWaiting = millis();
 		}
 	} while (!done);
@@ -666,14 +694,31 @@ extern "C" [[noreturn]] void UpdateFirmwareTask(void *pvParameters) noexcept
 		do
 		{
 			Platform::SpinMinimal();								// make sure the currentVin is up to date and the green LED gets turned off
-		} while (millis() - start < 100);
+		} while (millis() - start < 10);							// was 100ms, which alone added ~18s to an update (~180 blocks); the LED still flickers visibly
 
 		uint32_t fileSize;
 		const FirmwareFlashErrorCode err = GetBlock(bufferStartOffset, fileSize, reinterpret_cast<uint8_t*>(blockBuffer));
 		if (err != FirmwareFlashErrorCode::ok)
 		{
 			ReportFlashError(err);
+			// Update mode has no other recovery path (no command processing, and the retry loop keeps
+			// the watchdog alive), so a persistent error here used to loop forever and need a physical
+			// power cycle. The flash has not been touched at this stage - the image is fetched into
+			// RAM in full before any erase - so after a few consecutive failures reboot back into the
+			// existing firmware instead.
+			static unsigned int consecutiveFailures = 0;
+			if (++consecutiveFailures >= 5)
+			{
+				debugPrintf("Firmware update abandoned after %u failures; rebooting to the existing firmware\n", consecutiveFailures);
+				delay(3);											// let the message flush
+				watchdog_reboot(0, 0, 0);
+				for (;;) { }
+			}
 			continue;
+		}
+		if ((bufferStartOffset & 0xFFFF) == 0)
+		{
+			debugPrintf("Fetched block at %" PRIu32 ", t=%" PRIu32 "ms\n", bufferStartOffset, millis());	// transfer cadence, visible on the USB console
 		}
 		if (bufferStartOffset == 0)
 		{
