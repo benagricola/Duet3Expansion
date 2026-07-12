@@ -34,6 +34,7 @@ namespace Core1Runtime
 	void Init() noexcept;							// claim the spinlocks etc.; call before Start and before any cross-core locker use
 	void Start() noexcept;							// launch the default core-1 main loop (idle: heartbeat/park/mailbox only)
 	void Start(Core1EntryFn entry) noexcept;		// launch a specific core-1 entry (e.g. the TMC control loop); it must call Yield() regularly
+	void HaltForReset() noexcept;					// reset core 1 into the bootrom and mark it not started (call before a system reset)
 	bool IsStarted() noexcept;
 
 	// Service core-1 housekeeping (heartbeat, park requests, mailbox) until the given step-timer
