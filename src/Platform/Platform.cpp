@@ -1153,7 +1153,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: 3.7 stack build 1 (PR series + USB diagnostics)\n");
+			debugPrintf("Bench: 3.7 stack build (TMC5160 core1 driver)\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
