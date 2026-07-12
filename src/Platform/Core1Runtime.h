@@ -51,6 +51,9 @@ namespace Core1Runtime
 	bool IsParked() noexcept;
 	bool LaunchFailed() noexcept;					// true if Start() could not bring core 1 up and booted without it
 	uint32_t GetResetAttempts() noexcept;			// force-off/on attempts the last core-1 reset needed (diagnostics)
+	bool LaunchInProgress() noexcept;				// true inside Start()'s reset/launch window; vApplicationTickHook suspends the watchdog kick while set
+	uint32_t GetLaunchRetries() noexcept;			// watchdog-reboot launch retries consumed before this boot's Start() (0 = first try worked)
+	uint32_t GetLaunchProgress() noexcept;			// progress code of the most recent launch attempt (see Core1Runtime.cpp)
 
 	spin_lock_t *GetCrossCoreLock() noexcept;		// guards the motion segment structures; initialised by Init()
 	spin_lock_t *GetSegmentPoolLock() noexcept;		// guards the MoveSegment freelist (separate lock: the motion lock is held while segments are released)

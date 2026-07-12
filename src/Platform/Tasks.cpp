@@ -892,9 +892,10 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 	// Append a memory report to a string
 	reply.lcatf("Never used RAM %d, free system stack %d words", GetNeverUsedRam(), GetHandlerFreeStack()/4);
 #if RPXXXX && SPICAN_CORE0_SERVICE
-	reply.lcatf("Core 1: %s, heartbeat %" PRIu32 ", resetAttempts %" PRIu32 "%s",
+	reply.lcatf("Core 1: %s, heartbeat %" PRIu32 ", resetAttempts %" PRIu32 ", launch progress %" PRIu32 ", retries %" PRIu32 "%s",
 				(!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running",
 				Core1Runtime::GetHeartbeat(), Core1Runtime::GetResetAttempts(),
+				Core1Runtime::GetLaunchProgress(), Core1Runtime::GetLaunchRetries(),
 				Core1Runtime::LaunchFailed() ? " LAUNCH-FAILED" : "");
 #endif
 	reply.lcat("Tasks:");
@@ -1128,7 +1129,18 @@ static inline void CheckSpinLockAndResetIfStuck() noexcept
 extern "C" void vApplicationTickHook(void) noexcept
 {
 	CoreSysTick();
+#if RPXXXX && SPICAN_CORE0_SERVICE
+	// Suspend the kick while Core1Runtime::Start() is inside its core-1 reset/launch window, so that a
+	// hang in the SDK's unboundable multicore_launch_core1() watchdog-reboots in ~1s instead of being
+	// kept alive from this ISR forever. Start() bounds the resulting reboot retries and then boots
+	// without core 1, leaving the board responsive.
+	if (!Core1Runtime::LaunchInProgress())
+	{
+		WatchdogReset();						// kick the watchdog
+	}
+#else
 	WatchdogReset();							// kick the watchdog
+#endif
 	Platform::Tick();
 
 	CheckSpinLockAndResetIfStuck();

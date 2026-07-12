@@ -15,6 +15,7 @@
 #include <hardware/structs/timer.h>
 #include <hardware/structs/psm.h>
 #include <hardware/structs/sio.h>
+#include <hardware/structs/watchdog.h>
 #include <hardware/irq.h>
 #include <Platform/Tasks.h>
 #include <Movement/StepTimer.h>
@@ -47,6 +48,33 @@ namespace Core1Runtime
 	// if core 1 never acknowledges.
 	static volatile bool launchFailed = false;			// core 1 could not be brought up; core 0 booted without it
 	static volatile uint32_t lastResetAttempts = 0;		// how many force-off/on attempts the last reset needed (0 = not yet run)
+
+	// The SDK's multicore_launch_core1() blocks unboundedly in a FIFO handshake and has been seen to
+	// hang on a warm boot; it cannot be bounded or reimplemented (its core-1 side is static in the
+	// SDK). The escape is the hardware watchdog: vApplicationTickHook suspends its kick while
+	// launchInProgress is set, so a hang inside the launch window reboots in ~1s instead of wedging
+	// silently. Launch attempts are counted in a watchdog scratch register (which survives warm
+	// resets) so the reboot loop is bounded: after MaxLaunchAttempts the next boot gives up and boots
+	// without core 1, leaving the board responsive. A progress code in another scratch register
+	// records how far the last attempt got, for the 'D' report.
+	static volatile bool launchInProgress = false;		// true only inside Start()'s reset/launch window (read by vApplicationTickHook)
+	static uint32_t priorLaunchAttempts = 0;			// launch attempts consumed by watchdog reboots before this boot's Start()
+
+	constexpr uint32_t MaxLaunchAttempts = 3;
+	constexpr size_t LaunchAttemptScratchIndex = 1;		// scratch[0] is the firmware-update magic word; [4..7] belong to the SDK watchdog code
+	constexpr size_t LaunchProgressScratchIndex = 3;
+
+#if MNB_USB_DIAG
+	constexpr size_t LaunchHangTestScratchIndex = 2;	// armed by the bench-only 1202-baud USB handler (SerialCDC_tusb.cpp)
+	constexpr uint32_t LaunchHangTestMagic = 0x7E57CAFE;
+#endif
+
+	// Progress codes written to scratch[LaunchProgressScratchIndex]
+	constexpr uint32_t LaunchProgressEntered = 1;		// Start() entered the launch window
+	constexpr uint32_t LaunchProgressResetOk = 2;		// core-1 hard reset acknowledged
+	constexpr uint32_t LaunchProgressLaunching = 3;		// about to call multicore_launch_core1 (a hang here is the known failure)
+	constexpr uint32_t LaunchProgressDone = 4;			// multicore_launch_core1 returned; core 1 running
+	constexpr uint32_t LaunchProgressResetFailed = 0x20;	// core-1 hard reset never acknowledged
 
 	// Bounded, retrying replacement for the SDK's multicore_reset_core1() (which pop_blocking-waits
 	// forever for core 1's readiness word). Hard power-cycles core 1 through the PSM and waits, bounded,
@@ -148,17 +176,50 @@ namespace Core1Runtime
 		{
 			core1Entry = entry;
 			Init();
+
+			// Bound the watchdog-reboot retry loop (see the launchInProgress comment above). The
+			// scratch counter survives warm resets; it is zeroed on every path that leaves Start().
+			priorLaunchAttempts = watchdog_hw->scratch[LaunchAttemptScratchIndex];
+			if (priorLaunchAttempts >= MaxLaunchAttempts)
+			{
+				watchdog_hw->scratch[LaunchAttemptScratchIndex] = 0;
+				launchFailed = true;								// boot without core 1; board stays responsive and re-flashable
+				return;
+			}
+			watchdog_hw->scratch[LaunchAttemptScratchIndex] = priorLaunchAttempts + 1;
+			watchdog_hw->scratch[LaunchProgressScratchIndex] = LaunchProgressEntered;
+			launchInProgress = true;								// a hang from here on watchdog-reboots in ~1s instead of wedging
+
 			// Bounded, retried hard reset rather than the SDK's multicore_reset_core1(), which can hang
 			// forever on a warm (non-cold) boot. If core 1 will not come up, boot without it instead of
 			// locking up: the 'D' report shows launchFailed and the board stays alive and re-flashable.
 			if (!RobustResetCore1(50, 5))
 			{
+				watchdog_hw->scratch[LaunchProgressScratchIndex] = LaunchProgressResetFailed;
+				watchdog_hw->scratch[LaunchAttemptScratchIndex] = 0;
+				launchInProgress = false;
 				launchFailed = true;
 				return;
 			}
+			watchdog_hw->scratch[LaunchProgressScratchIndex] = LaunchProgressResetOk;
 			multicore_fifo_drain();									// clear any stale inter-core FIFO data before the launch handshake
 			delay(100);												// match the proven CAN-core-1 launch timing
+			watchdog_hw->scratch[LaunchProgressScratchIndex] = LaunchProgressLaunching;
+#if MNB_USB_DIAG
+			if (watchdog_hw->scratch[LaunchHangTestScratchIndex] == LaunchHangTestMagic)
+			{
+				// Bench self-test of the watchdog escape: fake the observed hang at its real location,
+				// once (the magic is consumed). The gated kick must let the watchdog reboot us in ~1s,
+				// and the retry must then show up as a nonzero retry count in the 'D' report.
+				watchdog_hw->scratch[LaunchHangTestScratchIndex] = 0;
+				for (;;) { }
+			}
+#endif
 			multicore_launch_core1(Core1RuntimeEntry);
+			watchdog_hw->scratch[LaunchProgressScratchIndex] = LaunchProgressDone;
+			launchInProgress = false;
+			watchdog_hw->scratch[LaunchAttemptScratchIndex] = 0;
+			WatchdogReset();										// top the watchdog back up after the un-kicked launch window
 			launchFailed = false;
 			started = true;
 		}
@@ -253,6 +314,9 @@ namespace Core1Runtime
 	bool IsParked() noexcept { return parked; }
 	bool LaunchFailed() noexcept { return launchFailed; }
 	uint32_t GetResetAttempts() noexcept { return lastResetAttempts; }
+	bool LaunchInProgress() noexcept { return launchInProgress; }
+	uint32_t GetLaunchRetries() noexcept { return priorLaunchAttempts; }
+	uint32_t GetLaunchProgress() noexcept { return watchdog_hw->scratch[LaunchProgressScratchIndex]; }
 
 	// RAM-resident: called from core 1 inside the motion critical section every control cycle, so a
 	// flash fetch here would defeat the point of running the loop on core 1
