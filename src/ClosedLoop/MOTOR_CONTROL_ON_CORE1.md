@@ -1,4 +1,4 @@
-# Motor control on core 1 — structural redesign (Option 2)
+# Motor control on core 1
 
 ## Target architecture
 
