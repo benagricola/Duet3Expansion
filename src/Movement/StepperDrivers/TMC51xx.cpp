@@ -896,6 +896,16 @@ bool TmcDriverState::SetDriverMode(unsigned int mode) noexcept
 		UpdateChopConfRegister();
 		break;
 
+#if SUPPORT_CLOSED_LOOP
+	case (unsigned int)DriverMode::direct:					// closed loop
+	case (unsigned int)DriverMode::direct + 1:				// assisted open loop; both use the TMC's direct (XDIRECT) mode
+		// The main-board driver enters direct mode through EnablePhaseStepping(); the expansion firmware
+		// drives it through SetDriverMode, so handle it here as the previous expansion driver did.
+		UpdateRegister(WriteGConf, (writeRegisters[WriteGConf] & ~GCONF_STEALTHCHOP) | GCONF_DIRECT_MODE);
+		UpdateCurrent();									// entering closed loop: update the standstill current
+		break;
+#endif
+
 	default:
 		return false;
 	}
