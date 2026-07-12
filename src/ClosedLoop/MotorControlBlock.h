@@ -3,7 +3,7 @@
  *
  * The single, explicit interface between the two cores when motor control runs on core 1.
  *
- * DESIGN (Option 2 - isolate the hot loop):
+ * DESIGN:
  *   The 80us control cycle is split into two layers that talk ONLY through this block:
  *
  *   - CORE 1 (the servo, bare metal, in MotorControlLoop.cpp): a tiny pure kernel. Every cycle it reads the
