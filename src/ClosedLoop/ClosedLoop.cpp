@@ -42,7 +42,7 @@ using std::numeric_limits;
 # include "Encoders/LinearCompositeEncoder.h"
 
 # include <ClosedLoop/DerivativeAveragingFilter.h>
-# include <ClosedLoop/ControlLaw.h>
+# include <ClosedLoop/MotorControlMath.h>
 
 # include <math.h>
 # include <Platform/Platform.h>
@@ -176,14 +176,14 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 	coilB = (int16_t)lrintf(sine * magnitude);
 
 #if TMC_ON_CORE1
-	if (motorBlock.mode == MotorMode::directCommand)
+	if (motorState.mode == MotorMode::directCommand)
 	{
-		// The core-1 kernel owns the TMC coil staging: hand it the command through the block.
+		// The core-1 kernel owns the TMC coil staging: hand it the command through the shared state.
 		// This is the tuning sequencer's path (it always runs with the kernel in directCommand mode).
-		motorBlock.commandSeq = motorBlock.commandSeq + 1;			// odd: update in progress
-		motorBlock.commandedPhase = phase;
-		motorBlock.commandedCurrentFraction = magnitude;
-		motorBlock.commandSeq = motorBlock.commandSeq + 1;			// even: consistent
+		motorState.commandSeq = motorState.commandSeq + 1;			// odd: update in progress
+		motorState.commandedPhase = phase;
+		motorState.commandedCurrentFraction = magnitude;
+		motorState.commandSeq = motorState.commandSeq + 1;			// even: consistent
 		return;
 	}
 	// Otherwise the kernel is idle or core 1 is parked (the closed-loop mode transitions), so there is
@@ -246,7 +246,7 @@ void ClosedLoop::InitInstance() noexcept
 
 #if TMC_ON_CORE1
 	PublishControlParameters(true);						// give the core-1 kernel the default gains and thresholds
-	motorBlock.sampleBuffer = &sampleBuffer;			// where the kernel packs diagnostic samples (M569.5)
+	motorState.sampleBuffer = &sampleBuffer;			// where the kernel packs diagnostic samples (M569.5)
 	Core1Runtime::SetYieldPoll(MotorControl::KernelYieldPoll);	// open-loop step generation (runs before core 1 is launched, so no race)
 #endif
 }
@@ -257,19 +257,19 @@ void ClosedLoop::InitInstance() noexcept
 // (matching what the pre-core-1 code did on a gain change).
 void ClosedLoop::PublishControlParameters(bool resetControl) noexcept
 {
-	motorBlock.paramSeq = motorBlock.paramSeq + 1;		// odd: update in progress
-	motorBlock.Kp = Kp;
-	motorBlock.Ki = Ki;
-	motorBlock.Kd = Kd;
-	motorBlock.Kv = Kv;
-	motorBlock.Ka = Ka;
-	motorBlock.preErrorThreshold = errorThresholds[0];
-	motorBlock.errorThreshold = errorThresholds[1];
-	motorBlock.holdCurrentFraction = holdCurrentFraction;
-	motorBlock.paramSeq = motorBlock.paramSeq + 1;		// even: consistent
+	motorState.paramSeq = motorState.paramSeq + 1;		// odd: update in progress
+	motorState.Kp = Kp;
+	motorState.Ki = Ki;
+	motorState.Kd = Kd;
+	motorState.Kv = Kv;
+	motorState.Ka = Ka;
+	motorState.preErrorThreshold = errorThresholds[0];
+	motorState.errorThreshold = errorThresholds[1];
+	motorState.holdCurrentFraction = holdCurrentFraction;
+	motorState.paramSeq = motorState.paramSeq + 1;		// even: consistent
 	if (resetControl)
 	{
-		motorBlock.resetSeq = motorBlock.resetSeq + 1;
+		motorState.resetSeq = motorState.resetSeq + 1;
 	}
 }
 #endif
@@ -409,7 +409,7 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 		// We set the mode to open loop earlier in this function so no need to do it here
 #if TMC_ON_CORE1
-		motorBlock.encoder = nullptr;						// core 1 is parked, but it must not see a dangling pointer when it resumes
+		motorState.encoder = nullptr;						// core 1 is parked, but it must not see a dangling pointer when it resumes
 #endif
 		DeleteObject(encoder);
 
@@ -600,11 +600,11 @@ GCodeResult ClosedLoop::ProcessM569Point5(const CanMessageStartClosedLoopDataCol
 #if TMC_ON_CORE1
 		// Hand the collection to the core-1 kernel, which packs the samples into the shared buffer;
 		// ServiceDeferredNotifications mirrors its progress back into this state machine
-		motorBlock.sampleFilter = filterRequested;
-		motorBlock.samplesRequested = samplesRequested;
-		motorBlock.sampleIntervalTicks = dataCollectionIntervalTicks;
-		motorBlock.sampleStartMode = (requestedMode == (uint8_t)RecordingMode::Immediate) ? 1 : 2;
-		motorBlock.sampleArmSeq = motorBlock.sampleArmSeq + 1;
+		motorState.sampleFilter = filterRequested;
+		motorState.samplesRequested = samplesRequested;
+		motorState.sampleIntervalTicks = dataCollectionIntervalTicks;
+		motorState.sampleStartMode = (requestedMode == (uint8_t)RecordingMode::Immediate) ? 1 : 2;
+		motorState.sampleArmSeq = motorState.sampleArmSeq + 1;
 #endif
 		StartTuning(msg.movement);
 	}
@@ -885,9 +885,9 @@ void ClosedLoop::StartTuning(uint8_t tuningMode) noexcept
 		if (tuning != 0)
 		{
 			CreateTuningTask();
-			if (motorBlock.mode == MotorMode::closedLoop)
+			if (motorState.mode == MotorMode::closedLoop)
 			{
-				desiredStepPhase = motorBlock.measuredStepPhase;	// start the sweep from the rotor's actual phase, which the kernel keeps fresh
+				desiredStepPhase = motorState.measuredStepPhase;	// start the sweep from the rotor's actual phase, which the kernel keeps fresh
 			}
 			tuningTask->Give(NotifyIndices::ClosedLoopDataTransmission);
 		}
@@ -905,9 +905,9 @@ void ClosedLoop::UpdateKernelMode() noexcept
 								: (currentMode == ClosedLoopMode::closed) ? MotorMode::closedLoop
 									: (currentMode == ClosedLoopMode::assistedOpen) ? MotorMode::assistedOpen
 										: MotorMode::openLoopStep;		// open loop: the kernel polls the step deadlines (staging 3)
-	motorBlock.mode = newMode;
+	motorState.mode = newMode;
 	moveInstance->SetSteppingOnCore1(newMode == MotorMode::openLoopStep);	// gates the core-0 step ISR out while the kernel steps
-	motorBlock.resetSeq = motorBlock.resetSeq + 1;
+	motorState.resetSeq = motorState.resetSeq + 1;
 }
 
 // The tuning sequencer. Before the core-1 kernel existed, tuning manoeuvres ran as a state machine
@@ -927,7 +927,7 @@ void ClosedLoop::UpdateKernelMode() noexcept
 			const bool driveDirect = (tuning & (BASIC_TUNING_MANOEUVRE | ENCODER_CALIBRATION_MANOEUVRE | ENCODER_CALIBRATION_CHECK)) != 0;
 			if (driveDirect)
 			{
-				motorBlock.mode = MotorMode::directCommand;
+				motorState.mode = MotorMode::directCommand;
 				SetMotorPhase(desiredStepPhase, 1.0);				// energise at the starting phase, ready for the sweep
 			}
 			delay(100);												// allow time for brake release and motor current buildup (was stepTicksBeforeTuning)
@@ -935,8 +935,8 @@ void ClosedLoop::UpdateKernelMode() noexcept
 			{
 				// A data collection is armed to start on the next move (M569.5 with a tuning move):
 				// there is no closed-loop move to trigger on in direct-command mode, so start it now
-				motorBlock.sampleStartMode = 1;
-				motorBlock.sampleArmSeq = motorBlock.sampleArmSeq + 1;
+				motorState.sampleStartMode = 1;
+				motorState.sampleArmSeq = motorState.sampleArmSeq + 1;
 			}
 			// Dispatch one manoeuvre at a time to the kernel's sweep engine, preserving PerformTune()'s
 			// priority order, chaining and error semantics. The sweep itself runs on core 1 at the
@@ -977,15 +977,15 @@ void ClosedLoop::UpdateKernelMode() noexcept
 					break;
 				}
 
-				motorBlock.sweepKind = kind;
-				motorBlock.sweepArmSeq = motorBlock.sweepArmSeq + 1;
-				while (motorBlock.sweepState != MotorSweepState::done && tuning != 0)
+				motorState.sweepKind = kind;
+				motorState.sweepArmSeq = motorState.sweepArmSeq + 1;
+				while (motorState.sweepState != MotorSweepState::done && tuning != 0)
 				{
 					delay(10);
 				}
-				const bool completed = (motorBlock.sweepState == MotorSweepState::done);
-				motorBlock.sweepKind = MotorSweepKind::none;		// disarm; the kernel returns to idle sweep state
-				motorBlock.sweepArmSeq = motorBlock.sweepArmSeq + 1;
+				const bool completed = (motorState.sweepState == MotorSweepState::done);
+				motorState.sweepKind = MotorSweepKind::none;		// disarm; the kernel returns to idle sweep state
+				motorState.sweepArmSeq = motorState.sweepArmSeq + 1;
 				if (!completed)
 				{
 					break;											// tuning was cancelled externally
@@ -1109,8 +1109,8 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 				}
 				else
 				{
-					// Look for a stall or pre-stall (shared hysteresis, ControlLaw.h)
-					if (MotorControlLaw::UpdateStallDetection(fabsf(currentPositionError), errorThresholds[0], errorThresholds[1], stall, preStall))
+					// Look for a stall or pre-stall (shared hysteresis, MotorControlMath.h)
+					if (MotorControlMath::UpdateStallDetection(fabsf(currentPositionError), errorThresholds[0], errorThresholds[1], stall, preStall))
 					{
 #if TMC_ON_CORE1
 						deferredDriverFault = true;						// core 1 cannot call FreeRTOS; SmartDrivers::Spin forwards this
@@ -1320,11 +1320,11 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 	}
 	else
 	{
-		// The control mathematics live in ControlLaw.h, shared verbatim with the core-1 motor kernel
+		// The control mathematics live in MotorControlMath.h, shared verbatim with the core-1 motor kernel
 		if (currentMode == ClosedLoopMode::closed)
 		{
 			const uint32_t measuredStepPhase = encoder->GetCurrentPhasePosition();
-			MotorControlLaw::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
+			MotorControlMath::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
 								currentPositionError, errorDerivativeFilter.GetDerivative(), speedFilter.GetDerivative(),
 								mParams.speed, mParams.acceleration, ticksSinceLastCall, measuredStepPhase,
 								PIDPTerm, PIDITerm, PIDDTerm, PIDVTerm, PIDATerm, PIDControlSignal,
@@ -1357,7 +1357,7 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 		else
 		{
 			// Driver is in assisted open loop mode
-			MotorControlLaw::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
+			MotorControlMath::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
 								currentPositionError, errorDerivativeFilter.GetDerivative(),
 								mParams.speed, mParams.acceleration,
 								mParams.position, phaseOffset, holdCurrentFraction,
@@ -1441,7 +1441,7 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	// From the kernel's motor control block. Note poserr_max is since the last statistics period
 	// (the mainboard's regular status polls reset it), not since the 'Z' command.
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
-				millis() - benchTelResetMs, motorBlock.cycleCount, (double)motorBlock.statMaxAbsError);
+				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.statMaxAbsError);
 #else
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
 				millis() - benchTelResetMs, benchTelLoopCount, (double)benchTelMaxAbsPosErr);
@@ -1487,13 +1487,13 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	uint32_t xdFrames, xdPhase, gconf;
 	SmartDrivers::GetBenchXdirectDiag(xdFrames, xdPhase, gconf);
 	reply.printf("PLIVE mode=%u enc=%" PRIi32 " err=%.3f curfrac=%.3f cmdphase=%u measphase=%u encok=%u xdir=%" PRIu32 " pts=0x%08" PRIx32 " gconf=0x%08" PRIx32 " sweep=%u/%" PRIu32 " poll=%" PRIu32 " steps=%" PRIu32 " mask=0x%" PRIx32 " gap=%" PRIu32 "/%" PRIu32,
-				(unsigned int)motorBlock.mode,
-				motorBlock.encoderCount, (double)motorBlock.positionError, (double)motorBlock.currentFraction,
-				motorBlock.commandedStepPhase, motorBlock.measuredStepPhase, (unsigned int)motorBlock.encoderReadOk,
-				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations,
-				motorBlock.stepPollCalls, motorBlock.stepsEmitted, motorBlock.stepPollMask,
-				motorBlock.stepGapMinTicks, motorBlock.stepGapMaxTicks);
-	reply.catf(" dirsteps=%" PRIu32 "/%" PRIu32 " encfail=%" PRIu32, motorBlock.stepsDirHigh, motorBlock.stepsDirLow, motorBlock.encoderFailCount);
+				(unsigned int)motorState.mode,
+				motorState.encoderCount, (double)motorState.positionError, (double)motorState.currentFraction,
+				motorState.commandedStepPhase, motorState.measuredStepPhase, (unsigned int)motorState.encoderReadOk,
+				xdFrames, xdPhase, gconf, (unsigned int)motorState.sweepState, motorState.sweepIterations,
+				motorState.stepPollCalls, motorState.stepsEmitted, motorState.stepPollMask,
+				motorState.stepGapMinTicks, motorState.stepGapMaxTicks);
+	reply.catf(" dirsteps=%" PRIu32 "/%" PRIu32 " encfail=%" PRIu32, motorState.stepsDirHigh, motorState.stepsDirLow, motorState.encoderFailCount);
 	if (benchProbeInstance != nullptr)
 	{
 		reply.catf(" tun=%#x terr=%#x cal=%u", (unsigned int)benchProbeInstance->tuning, (unsigned int)benchProbeInstance->tuningError,
@@ -1512,11 +1512,11 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	benchTelMaxAbsPosErr = 0.0;
 	benchTelResetMs = millis();
 #if TMC_ON_CORE1
-	motorBlock.stepGapMinTicks = 0;
-	motorBlock.stepGapMaxTicks = 0;
-	motorBlock.stepLastTicks = 0;
-	motorBlock.stepsDirHigh = 0;
-	motorBlock.stepsDirLow = 0;
+	motorState.stepGapMinTicks = 0;
+	motorState.stepGapMaxTicks = 0;
+	motorState.stepLastTicks = 0;
+	motorState.stepsDirHigh = 0;
+	motorState.stepsDirLow = 0;
 #endif
 }
 # endif	// SUPPORT_CLOSED_LOOP
@@ -1527,9 +1527,9 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 // Perform the FreeRTOS notifications deferred by the core-1 control loop. Called on core 0 from Move::Spin.
 /*static*/ void ClosedLoop::ServiceDeferredNotifications() noexcept
 {
-	if (motorBlock.faultPending)
+	if (motorState.faultPending)
 	{
-		motorBlock.faultPending = false;
+		motorState.faultPending = false;
 		Heat::NewDriverFault();
 	}
 	if (deferredDriverFault)
@@ -1552,8 +1552,8 @@ void ClosedLoop::ServiceKernelSampling() noexcept
 	const RecordingMode locMode = samplingMode;
 	if (locMode == RecordingMode::Immediate || locMode == RecordingMode::OnNextMove)
 	{
-		samplesCollected = motorBlock.samplesCollected;
-		const MotorSampleState kernelState = motorBlock.sampleState;
+		samplesCollected = motorState.samplesCollected;
+		const MotorSampleState kernelState = motorState.sampleState;
 		if (locMode == RecordingMode::OnNextMove && kernelState >= MotorSampleState::recording)
 		{
 			samplingMode = RecordingMode::Immediate;			// the move (or tuning sweep) has started
@@ -1587,8 +1587,8 @@ StandardDriverStatus ClosedLoop::ReadLiveStatus() const noexcept
 	StandardDriverStatus result;
 	result.all = 0;
 #if TMC_ON_CORE1
-	result.closedLoopPositionNotMaintained = motorBlock.stall;		// the core-1 kernel owns stall detection
-	result.closedLoopPositionWarning = motorBlock.preStall;
+	result.closedLoopPositionNotMaintained = motorState.stall;		// the core-1 kernel owns stall detection
+	result.closedLoopPositionWarning = motorState.preStall;
 #else
 	result.closedLoopPositionNotMaintained = stall;
 	result.closedLoopPositionWarning = preStall;
@@ -1671,8 +1671,8 @@ bool ClosedLoop::SetClosedLoopEnabled(ClosedLoopMode mode, const StringRef &repl
 #if TMC_ON_CORE1
 	// Hand the new state to the core-1 motor kernel. We are called with core 1 parked (the M569/M569.1
 	// paths take a Core1ParkLocker), so the kernel sees a consistent snapshot when it resumes.
-	motorBlock.encoder = encoder;
-	motorBlock.stall = motorBlock.preStall = motorBlock.faultPending = false;
+	motorState.encoder = encoder;
+	motorState.stall = motorState.preStall = motorState.faultPending = false;
 	UpdateKernelMode();
 #endif
 
@@ -1689,7 +1689,7 @@ void ClosedLoop::DriverSwitchedToClosedLoop() noexcept
 		const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0);
 		phaseOffset = (currentPhasePosition - stepPhase) & 4095;
 #if TMC_ON_CORE1
-		motorBlock.phaseOffset = phaseOffset;		// core 1 is parked during this transition
+		motorState.phaseOffset = phaseOffset;		// core 1 is parked during this transition
 #endif
 	}
 	desiredStepPhase = currentPhasePosition;
@@ -1716,8 +1716,8 @@ StandardDriverStatus ClosedLoop::ModifyDriverStatus(StandardDriverStatus origina
 	{
 		// Report position warnings and errors even in open loop mode, if tuning has been done
 #if TMC_ON_CORE1
-		originalStatus.closedLoopPositionWarning = motorBlock.preStall;			// the core-1 kernel owns stall detection
-		originalStatus.closedLoopPositionNotMaintained = motorBlock.stall;
+		originalStatus.closedLoopPositionWarning = motorState.preStall;			// the core-1 kernel owns stall detection
+		originalStatus.closedLoopPositionNotMaintained = motorState.stall;
 #else
 		originalStatus.closedLoopPositionWarning = preStall;
 		originalStatus.closedLoopPositionNotMaintained = stall;
@@ -1733,23 +1733,23 @@ void ClosedLoop::GetStatistics(ClosedLoopStatus& stat) noexcept
 #if TMC_ON_CORE1
 	// The core-1 kernel accumulates these in the motor control block. Read-and-reset without a lock:
 	// a race with the kernel loses at most one cycle's contribution, which is harmless for diagnostics.
-	const uint32_t numSamples = motorBlock.statSampleCount;
+	const uint32_t numSamples = motorState.statSampleCount;
 	if (numSamples == 0)
 	{
 		stat.averageCurrentFraction = stat.maxCurrentFraction = stat.rmsPositionError = stat.maxAbsPositionError = 0.0;
 	}
 	else
 	{
-		stat.averageCurrentFraction = (float16_t)(motorBlock.statSumCurrentFraction/numSamples);
-		stat.maxCurrentFraction = (float16_t)motorBlock.statMaxCurrentFraction;
-		stat.rmsPositionError = (float16_t)fastSqrtf(motorBlock.statSumSqError/numSamples);
-		stat.maxAbsPositionError = (float16_t)motorBlock.statMaxAbsError;
+		stat.averageCurrentFraction = (float16_t)(motorState.statSumCurrentFraction/numSamples);
+		stat.maxCurrentFraction = (float16_t)motorState.statMaxCurrentFraction;
+		stat.rmsPositionError = (float16_t)fastSqrtf(motorState.statSumSqError/numSamples);
+		stat.maxAbsPositionError = (float16_t)motorState.statMaxAbsError;
 
-		motorBlock.statSampleCount = 0;
-		motorBlock.statSumCurrentFraction = 0.0;
-		motorBlock.statMaxCurrentFraction = 0.0;
-		motorBlock.statSumSqError = 0.0;
-		motorBlock.statMaxAbsError = 0.0;
+		motorState.statSampleCount = 0;
+		motorState.statSumCurrentFraction = 0.0;
+		motorState.statMaxCurrentFraction = 0.0;
+		motorState.statSumSqError = 0.0;
+		motorState.statMaxAbsError = 0.0;
 	}
 #else
 	TaskCriticalSectionLocker lock;

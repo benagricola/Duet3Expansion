@@ -21,7 +21,7 @@
 # include "TuningErrors.h"
 # include "SampleBuffer.h"
 # include "Encoders/Encoder.h"
-# include "MotorControlBlock.h"
+# include "MotorControlState.h"
 # include "TuningMoves.h"
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
@@ -33,7 +33,7 @@ class Encoder;
 class SpiEncoder;
 class CanMessageGenericParser;
 
-// MotionParameters (the trajectory sample struct) now lives in MotorControlBlock.h, included above,
+// MotionParameters (the trajectory sample struct) now lives in MotorControlState.h, included above,
 // because the core-1 motor kernel shares it and must not include this header.
 
 enum class ClosedLoopMode

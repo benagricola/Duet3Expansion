@@ -1,23 +1,23 @@
 /*
- * MotorControlBlock.h
+ * MotorControlState.h
  *
  * The single, explicit interface between the two cores when motor control runs on core 1.
  *
  * DESIGN:
  *   The 80us control cycle is split into two layers that talk ONLY through this block:
  *
- *   - CORE 1 (the servo, bare metal, in MotorControlLoop.cpp): a tiny pure kernel. Every cycle it reads the
+ *   - CORE 1 (the motor-control kernel, bare metal, in MotorControlLoop.cpp): a tiny pure kernel. Every cycle it reads the
  *     encoder, reads its inputs from this block, either runs the PID or applies a direct command, sets
  *     the coil currents, and writes its outputs back to this block. It calls NO FreeRTOS, NO flash, NO
  *     allocation, NO notifications - none of it is reachable from MotorControlLoop.cpp, so a stray call is a
  *     build error, not a reset at 200MHz on the bench. That is the whole point.
  *
  *   - CORE 0 (management, a normal FreeRTOS task/handlers): owns everything that is not the hot cycle -
- *     tuning and calibration state machines (which drive the servo via the direct-command inputs and
+ *     tuning and calibration state machines (which drive the motor via the direct-command inputs and
  *     read the feedback outputs), NVM writes, fault/stall reporting, sample streaming, statistics
  *     reporting. All of it may use FreeRTOS freely because it runs on core 0.
  *
- *   Two narrow handles cross the block by design rather than being marshalled through it:
+ *   Two narrow handles cross this shared state by design rather than being marshalled through it:
  *   - the encoder object pointer (the kernel calls its TakeReading()/GetCurrentCount() interface - the
  *     encoder SPI HAL is part of the kernel's allowed surface). Core 0 writes it only while core 1 is
  *     parked, and nulls it before destroying the encoder.
@@ -28,7 +28,7 @@
  *
  * SYNCHRONISATION:
  *   Scalar fields are plain volatile: single-writer per field, and a torn read of one control cycle is
- *   harmless for a servo (the next cycle corrects it). Grouped inputs that must be consistent (the PID
+ *   harmless for a control loop (the next cycle corrects it). Grouped inputs that must be consistent (the PID
  *   gain set, a direct command) use the sequence-lock counters so the reader retries on a mid-update
  *   snapshot - lock-free, no FreeRTOS. The statistics accumulators are written by core 1 and
  *   read-and-reset by core 0; the races there lose at most one cycle's contribution (diagnostic only).
@@ -37,8 +37,8 @@
  *   This header pulls in nothing from FreeRTOS/flash so it is safe to include from either side.
  */
 
-#ifndef SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_
-#define SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_
+#ifndef SRC_CLOSEDLOOP_MOTORCONTROLSTATE_H_
+#define SRC_CLOSEDLOOP_MOTORCONTROLSTATE_H_
 
 #include <cstdint>
 #include <Core.h>			// defines the RPXXXX macro tested below (it is not a command-line define)
@@ -57,7 +57,7 @@ struct MotionParameters
 class Encoder;
 class SampleBuffer;
 
-// Kernel-side sample-streaming state, published in the block for core 0 to mirror (see below)
+// Kernel-side sample-streaming state, published here for core 0 to mirror (see below)
 enum class MotorSampleState : uint8_t
 {
 	idle = 0,
@@ -83,7 +83,7 @@ enum class MotorSweepState : uint8_t
 	done,				// sweep finished; core 0 performs the completion (result processing, calibration task)
 };
 
-// What the servo does each cycle, chosen by core 0.
+// What the motor-control kernel does each cycle, chosen by core 0.
 enum class MotorMode : uint32_t
 {
 	idle = 0,			// motor de-energised / holding; the kernel does nothing (core 0 owns the encoder in this mode)
@@ -93,7 +93,7 @@ enum class MotorMode : uint32_t
 	directCommand,		// apply commandedPhase/commandedCurrentFraction verbatim (used by tuning/calibration)
 };
 
-struct MotorControlBlock
+struct MotorControlState
 {
 	// ---- Inputs: written by core 0, read by core 1 --------------------------------------------------
 	volatile MotorMode mode = MotorMode::idle;
@@ -186,7 +186,7 @@ struct MotorControlBlock
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel
 	// control loop did (SampleBuffer was already single-producer core 1 / single-consumer core 0);
-	// only the arming/progress state crosses through the block. Core 0 mirrors the progress into the
+	// only the arming/progress state crosses through this shared state. Core 0 mirrors the progress into the
 	// ClosedLoop sampling state machine that the CAN transmission task runs on.
 	SampleBuffer *volatile sampleBuffer = nullptr;				// set once by core 0 at init; the kernel does not sample while it is null
 	volatile uint32_t sampleArmSeq = 0;							// bumped by core 0 to (re)arm or stop; the kernel latches the group below when it changes
@@ -199,7 +199,7 @@ struct MotorControlBlock
 };
 
 // The one shared instance lives in ordinary RAM (not the flash-cached region). Defined in MotorControlLoop.cpp.
-extern MotorControlBlock motorBlock;
+extern MotorControlState motorState;
 
 // The kernel's trajectory query, implemented by the motion system (Move.cpp). Evaluates - and in closed
 // loop mode advances - the motion segments for the closed-loop driver at time 'when' (movement time).
@@ -222,4 +222,4 @@ namespace MotorControl
 
 #endif	// RPXXXX && TMC_ON_CORE1
 
-#endif /* SRC_CLOSEDLOOP_MOTORCONTROLBLOCK_H_ */
+#endif /* SRC_CLOSEDLOOP_MOTORCONTROLSTATE_H_ */

@@ -4,7 +4,7 @@
 
 **Core 1 = the motor-output engine.** It turns the trajectory core 0 plans into physical motion, by
 whichever method the mode selects, and nothing else. **Core 0 = planning + management** (move planning,
-tuning/calibration, NVM, reporting, comms). They talk only through `MotorControlBlock`.
+tuning/calibration, NVM, reporting, comms). They talk only through `MotorControlState`.
 
 Both motor-drive methods live on core 1 so that "motor control" is one coherent thing, not split by mode:
 
@@ -27,7 +27,7 @@ Both motor-drive methods live on core 1 so that "motor control" is one coherent 
 
 ## The rule that ends the whack-a-mole
 
-`MotorControlLoop.cpp` (core 1) includes only: `MotorControlBlock.h`, the TMC + encoder SPI HAL, the
+`MotorControlLoop.cpp` (core 1) includes only: `MotorControlState.h`, the TMC + encoder SPI HAL, the
 trig/PID math, and `StepTimer`. It does **not** include or call FreeRTOS, the NVM/flash API, CAN, or the
 object model. A stray call to any of them is a **link error at build time**, not a reset at 200 MHz on
 the bench. The compiler enforces the separation we kept violating by hand.
@@ -35,7 +35,7 @@ the bench. The compiler enforces the separation we kept violating by hand.
 ## What moves off the hot path onto core 0
 
 - `PerformTune` becomes a core-0 state machine that sequences `directCommand`s and reads back the encoder
-  from the block (the maneuver runs at core-0 pace; the kernel just does I/O).
+  from the shared state (the maneuver runs at core-0 pace; the kernel just does I/O).
 - Encoder calibration and its NVM writes (`Calibrate`/`ScrubLUT` → `EnsureWritten`) — core 0 only.
 - Fault/stall *reporting* (`NewDriverFault`, events), sample *draining* + CAN send, statistics *reporting*
   — all driven from flags/accumulators/ring the kernel writes, drained on core 0 (reusing the deferred
@@ -43,7 +43,7 @@ the bench. The compiler enforces the separation we kept violating by hand.
 
 ## Staging
 
-1. **Interface + closed-loop kernel** — `MotorControlBlock.h` (done), `MotorControlLoop.cpp` running
+1. **Interface + closed-loop kernel** — `MotorControlState.h` (done), `MotorControlLoop.cpp` running
    `closedLoop` + `directCommand` + `idle`. Core 0 populates inputs, reads outputs. *Proves the pattern
    and makes closed-loop holding work with zero FreeRTOS on core 1 — the part that needs the determinism.*
 
@@ -53,7 +53,7 @@ the bench. The compiler enforces the separation we kept violating by hand.
      reused unchanged rather than reimplemented. The block carries config/commands/telemetry; the
      12.5 kHz trajectory query stays a direct call. The cross-core motion lock therefore remains in the
      hot cycle, exactly as in the validated pre-kernel build.
-   - **Encoder**: the kernel calls the abstract `Encoder` interface through a pointer in the block,
+   - **Encoder**: the kernel calls the abstract `Encoder` interface through a pointer in the shared state,
      written by core 0 only while core 1 is parked (and nulled before the encoder is destroyed). The
      encoder SPI HAL is part of the kernel's allowed surface.
    - **Not yet ported, rejected with an error under `TMC_ON_CORE1`**: assisted open loop (M569 D5),
@@ -67,7 +67,7 @@ the bench. The compiler enforces the separation we kept violating by hand.
    Implemented: the manoeuvre state machines in `Tuning.cpp` are unchanged; they are now sequenced by
    a core-0 task (`ClosedLoop::TuningTaskLoop`, one `PerformTune()` step per millisecond — half the
    pre-kernel 2 kHz step rate, which only makes the sweep gentler) with the kernel in `directCommand`
-   mode. `ClosedLoop::SetMotorPhase` routes through the block's command group when the kernel owns the
+   mode. `ClosedLoop::SetMotorPhase` routes through the shared state's command group when the kernel owns the
    motor, and directly to the TMC staging otherwise (kernel idle / core 1 parked). Manoeuvre first
    iterations park core 1 around encoder-state mutation (LUT/data-collection clears).
    Bench-validated: M569.6 V2 full calibration succeeds (~40 s), persists through reboot, and the
@@ -116,7 +116,7 @@ the bench. The compiler enforces the separation we kept violating by hand.
    Streaming implemented (done before staging 3, which is independent): the kernel packs M569.5
    samples straight into the shared `SampleBuffer` — the same single-producer(core 1)/single-consumer
    (core 0) arrangement the pre-kernel loop used — in the exact pre-kernel wire order; only
-   arming/progress crosses the block, and `ClosedLoop::ServiceKernelSampling` (from `Move::Spin`)
+   arming/progress crosses the shared state, and `ClosedLoop::ServiceKernelSampling` (from `Move::Spin`)
    mirrors progress into the transmission state machine. On-next-move captures trigger from the
    kernel's trajectory query; tuning-move captures are started by the tuning task at sweep start
    (the pre-kernel version started them 5 ms before the first tuning step; that pre-roll is lost).

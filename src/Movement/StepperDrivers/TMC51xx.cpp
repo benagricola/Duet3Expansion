@@ -14,7 +14,7 @@
 #include <RTOSIface/RTOSIface.h>
 #include <Platform/Platform.h>
 #include <Movement/Move.h>
-#include <ClosedLoop/MotorControlBlock.h>
+#include <ClosedLoop/MotorControlState.h>
 #include <DmacManager.h>
 #include <Platform/TaskPriorities.h>
 #include <General/Portability.h>

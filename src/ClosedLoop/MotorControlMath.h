@@ -1,5 +1,5 @@
 /*
- * ControlLaw.h
+ * MotorControlMath.h
  *
  * The closed-loop and assisted-open-loop control law, shared between the two hosts that can
  * execute it:
@@ -18,8 +18,8 @@
  * CAN, the NVM/flash API or the object model, and must stay free of globals.
  */
 
-#ifndef SRC_CLOSEDLOOP_CONTROLLAW_H_
-#define SRC_CLOSEDLOOP_CONTROLLAW_H_
+#ifndef SRC_CLOSEDLOOP_MOTORCONTROLMATH_H_
+#define SRC_CLOSEDLOOP_MOTORCONTROLMATH_H_
 
 #include <RepRapFirmware.h>
 
@@ -27,7 +27,7 @@
 
 #include <Movement/StepTimer.h>
 
-namespace MotorControlLaw
+namespace MotorControlMath
 {
 	constexpr float PIDIlimit = 80.0;
 
@@ -111,4 +111,4 @@ namespace MotorControlLaw
 
 #endif	// SUPPORT_CLOSED_LOOP
 
-#endif	// SRC_CLOSEDLOOP_CONTROLLAW_H_
+#endif	// SRC_CLOSEDLOOP_MOTORCONTROLMATH_H_

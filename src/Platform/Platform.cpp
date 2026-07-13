@@ -1165,7 +1165,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v45 canspi mutex fix\n");
+			debugPrintf("Bench: v47 rename\n");
 # endif
 			String<700> reply;
 			Tasks::Diagnostics(reply.GetRef());
@@ -1227,15 +1227,15 @@ void Platform::Spin()
 		{
 			// USB bench diagnostic: as 'S' but the pulses are emitted by CORE 1 (via the motor kernel)
 			const uint16_t msposBefore = SmartDrivers::GetMicrostepPosition(0);
-			motorBlock.stepPollMask = 1u << (StepPins[0] & 31);
-			motorBlock.stepTestRequest = 1;
+			motorState.stepPollMask = 1u << (StepPins[0] & 31);
+			motorState.stepTestRequest = 1;
 			const uint32_t t0 = millis();
-			while (motorBlock.stepTestRequest != 2 && millis() - t0 < 8000) { delay(1); }
+			while (motorState.stepTestRequest != 2 && millis() - t0 < 8000) { delay(1); }
 			delay(3);
 			const uint16_t msposAfter = SmartDrivers::GetMicrostepPosition(0);
 			debugPrintf("STEPTEST core1: done=%u, mspos %u -> %u, ctrl wrote 0x%" PRIx32 " read 0x%" PRIx32 ", status(high) 0x%" PRIx32 ", gpio_out(set) 0x%" PRIx32 "\n",
-						motorBlock.stepTestRequest, msposBefore, msposAfter,
-						motorBlock.stepTestCtrlWritten, motorBlock.stepTestCtrlReadback, motorBlock.stepTestStatusHigh, motorBlock.stepTestSioReadback);
+						motorState.stepTestRequest, msposBefore, msposAfter,
+						motorState.stepTestCtrlWritten, motorState.stepTestCtrlReadback, motorState.stepTestStatusHigh, motorState.stepTestSioReadback);
 		}
 		else if (c == 'S')
 		{

@@ -524,8 +524,8 @@ void Move::AppendDiagnostics(const StringRef& reply) noexcept
 #if TMC_ON_CORE1
 	// The core-1 motor kernel keeps these in the motor control block
 	reply.lcatf("Phase step loop runtime (us): min=%" PRIu32 ", max=%" PRIu32 ", frequency (Hz): min=%" PRIu32 ", max=%" PRIu32 ", cycles %" PRIu32 "\n",
-			StepTimer::TicksToIntegerMicroseconds(motorBlock.minCycleRuntime), StepTimer::TicksToIntegerMicroseconds(motorBlock.maxCycleRuntime),
-			TickPeriodToFreq(motorBlock.maxCycleInterval), TickPeriodToFreq(motorBlock.minCycleInterval), motorBlock.cycleCount);
+			StepTimer::TicksToIntegerMicroseconds(motorState.minCycleRuntime), StepTimer::TicksToIntegerMicroseconds(motorState.maxCycleRuntime),
+			TickPeriodToFreq(motorState.maxCycleInterval), TickPeriodToFreq(motorState.minCycleInterval), motorState.cycleCount);
 	ResetPhaseStepMonitoringVariables();
 #elif SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 	reply.lcatf("Phase step loop runtime (us): min=%" PRIu32 ", max=%" PRIu32 ", frequency (Hz): min=%" PRIu32 ", max=%" PRIu32 "\n",
@@ -2336,7 +2336,7 @@ GCodeResult Move::ProcessM569Point6(const CanMessageGeneric &msg, const StringRe
 }
 
 #if RPXXXX && TMC_ON_CORE1
-// Trajectory query for the core-1 motor kernel (declared in MotorControlBlock.h). Evaluates - and
+// Trajectory query for the core-1 motor kernel (declared in MotorControlState.h). Evaluates - and
 // advances - the motion segments exactly as the closed-loop code always has. Runs on core 1, so it
 // must stay RAM-resident; the segment walk takes the cross-core motion lock internally.
 TIME_CRITICAL bool MotorControlGetTrajectory(uint32_t when, MotionParameters& mParams) noexcept
@@ -2344,7 +2344,7 @@ TIME_CRITICAL bool MotorControlGetTrajectory(uint32_t when, MotionParameters& mP
 	return moveInstance->GetCurrentMotion(0, when, mParams);
 }
 
-// Open-loop step generation for the core-1 motor kernel (declared in MotorControlBlock.h): polled
+// Open-loop step generation for the core-1 motor kernel (declared in MotorControlState.h): polled
 // continuously from the core-1 host loop while the kernel owns stepping (MotorMode::openLoopStep).
 // Equivalent to the step ISR's job, but polling makes interrupt scheduling and hiccups unnecessary:
 // an overdue step is simply emitted on the next poll, and the poll rate (a few MHz) is far above any
@@ -2361,7 +2361,7 @@ TIME_CRITICAL void Move::StepPollOnCore1() noexcept
 # if !SINGLE_DRIVER
 #  error Core-1 step generation is only implemented for single-driver boards
 # endif
-	motorBlock.stepPollCalls = motorBlock.stepPollCalls + 1;
+	motorState.stepPollCalls = motorState.stepPollCalls + 1;
 	if (dms[0].state >= DMState::firstMotionState)											// unlocked pre-check
 	{
 		const uint32_t now = StepTimer::GetMovementTimerTicks();
@@ -2386,20 +2386,20 @@ TIME_CRITICAL void Move::StepPollOnCore1() noexcept
 					dms[0].directionChanged = false;
 					SetDirection(dms[0].direction);
 				}
-				motorBlock.stepsEmitted = motorBlock.stepsEmitted + 1;
-				motorBlock.stepPollMask = dms[0].driversCurrentlyUsed;					// diagnostic: the pin mask actually pulsed
-				motorBlock.motorPosition = dms[0].currentMotorPosition;					// the openLoopStep position output the design doc specifies
+				motorState.stepsEmitted = motorState.stepsEmitted + 1;
+				motorState.stepPollMask = dms[0].driversCurrentlyUsed;					// diagnostic: the pin mask actually pulsed
+				motorState.motorPosition = dms[0].currentMotorPosition;					// the openLoopStep position output the design doc specifies
 				// Bench: track the min/max spacing of emitted steps so mis-pacing (bursts or stalls
 				// in emission) can be told apart from mechanical stalls when the rotor stops
-				if (motorBlock.stepLastTicks != 0)
+				if (motorState.stepLastTicks != 0)
 				{
-					const uint32_t gap = stepStartTicks - motorBlock.stepLastTicks;
-					if (motorBlock.stepGapMinTicks == 0 || gap < motorBlock.stepGapMinTicks) { motorBlock.stepGapMinTicks = gap; }
-					if (gap > motorBlock.stepGapMaxTicks) { motorBlock.stepGapMaxTicks = gap; }
+					const uint32_t gap = stepStartTicks - motorState.stepLastTicks;
+					if (motorState.stepGapMinTicks == 0 || gap < motorState.stepGapMinTicks) { motorState.stepGapMinTicks = gap; }
+					if (gap > motorState.stepGapMaxTicks) { motorState.stepGapMaxTicks = gap; }
 				}
-				motorBlock.stepLastTicks = stepStartTicks;
-				if ((sio_hw->gpio_in >> (DirectionPins[0] & 31)) & 1) { motorBlock.stepsDirHigh = motorBlock.stepsDirHigh + 1; }
-				else { motorBlock.stepsDirLow = motorBlock.stepsDirLow + 1; }
+				motorState.stepLastTicks = stepStartTicks;
+				if ((sio_hw->gpio_in >> (DirectionPins[0] & 31)) & 1) { motorState.stepsDirHigh = motorState.stepsDirHigh + 1; }
+				else { motorState.stepsDirLow = motorState.stepsDirLow + 1; }
 			}
 		}
 	}
@@ -2470,10 +2470,10 @@ void Move::ResetPhaseStepMonitoringVariables() noexcept
 	maxPSControlLoopCallInterval = 1;
 #if TMC_ON_CORE1
 	// The kernel's copies. Writing them from core 0 races benignly with the kernel (diagnostics only).
-	motorBlock.minCycleRuntime = std::numeric_limits<uint32_t>::max();
-	motorBlock.maxCycleRuntime = 1;
-	motorBlock.minCycleInterval = std::numeric_limits<uint32_t>::max();
-	motorBlock.maxCycleInterval = 1;
+	motorState.minCycleRuntime = std::numeric_limits<uint32_t>::max();
+	motorState.maxCycleRuntime = 1;
+	motorState.minCycleInterval = std::numeric_limits<uint32_t>::max();
+	motorState.maxCycleInterval = 1;
 #endif
 }
 

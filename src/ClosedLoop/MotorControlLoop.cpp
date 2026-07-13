@@ -1,21 +1,21 @@
 /*
  * MotorControlLoop.cpp
  *
- * The core-1 motor-control kernel (see MOTOR_CONTROL_ON_CORE1.md and MotorControlBlock.h).
+ * The core-1 motor-control kernel (see MOTOR_CONTROL_ON_CORE1.md and MotorControlState.h).
  *
- * THE RULE: this translation unit includes only MotorControlBlock.h, the encoder interface, the
+ * THE RULE: this translation unit includes only MotorControlState.h, the encoder interface, the
  * trig/PID math and StepTimer. FreeRTOS, the NVM/flash API, CAN and the object model are not visible
  * here, so a stray call to any of them is a build error rather than a crash at speed on the bench.
  * Keep it that way: do not add includes without checking what they drag in.
  *
  * The control law is a faithful port of the proven ClosedLoop::InstanceControlLoop /
  * ClosedLoop::ControlMotorCurrents closed-loop path (the v8-validated code); only where the state
- * lives has changed (this file's statics and the shared MotorControlBlock instead of the ClosedLoop
+ * lives has changed (this file's statics and the shared MotorControlState instead of the ClosedLoop
  * instance). Any change to the control law must be made in both places or the core-0 and core-1
  * builds will disagree.
  */
 
-#include "MotorControlBlock.h"
+#include "MotorControlState.h"
 
 #if RPXXXX && TMC_ON_CORE1
 
@@ -28,7 +28,7 @@
 #include "Encoders/Encoder.h"
 #include "SampleBuffer.h"
 #include "TuningMoves.h"
-#include "ControlLaw.h"
+#include "MotorControlMath.h"
 
 // Narrow shim into the TMC driver HAL. Declared here rather than by including the driver header
 // (which drags in the whole platform); the C++ mangled name makes a signature mismatch a link error.
@@ -37,7 +37,7 @@ namespace SmartDrivers
 	bool SetMotorPhases(size_t driver, uint32_t regVal) noexcept;
 }
 
-MotorControlBlock motorBlock;
+MotorControlState motorState;
 
 namespace MotorControl
 {
@@ -65,7 +65,7 @@ namespace MotorControl
 	static float lastPIDControlSignal = 0.0, lastPIDPTerm = 0.0, lastPIDDTerm = 0.0, lastPIDVTerm = 0.0, lastPIDATerm = 0.0;
 	static int16_t lastCoilA = 0, lastCoilB = 0;
 
-	// Sample-streaming state (latched from the block when sampleArmSeq changes)
+	// Sample-streaming state (latched from the shared state when sampleArmSeq changes)
 	static uint32_t lastSampleArmSeq = 0;
 	static uint16_t sampleFilter = 0;
 	static uint16_t samplesWanted = 0;
@@ -73,7 +73,7 @@ namespace MotorControl
 	static uint32_t whenNextSampleDue = 0;
 	static uint32_t sampleStartTicks = 0;
 
-	// Tuning-sweep state (latched from the block when sweepArmSeq changes). The sweep runs at the
+	// Tuning-sweep state (latched from the shared state when sweepArmSeq changes). The sweep runs at the
 	// pre-kernel-split step pacing: one step per stepTicksPerTuningStep, i.e. 2kHz.
 	constexpr unsigned int tuningStepsPerSecond = 2000;			// mirrors the constant private to ClosedLoop
 	constexpr uint32_t stepTicksPerTuningStep = StepTimer::StepClockRate/tuningStepsPerSecond;
@@ -91,7 +91,7 @@ namespace MotorControl
 		const int16_t coilA = (int16_t)lrintf(cosine * magnitude);
 		const int16_t coilB = (int16_t)lrintf(sine * magnitude);
 		(void)SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
-		motorBlock.commandedStepPhase = phase;
+		motorState.commandedStepPhase = phase;
 		lastCoilA = coilA;
 		lastCoilB = coilB;
 	}
@@ -102,46 +102,46 @@ namespace MotorControl
 	// the progress fields into the transmission state machine.
 	TIME_CRITICAL static void SampleStream(uint32_t now, bool hasMove, Encoder *encoder, const MotionParameters& mParams, float positionError) noexcept
 	{
-		const uint32_t armSeq = motorBlock.sampleArmSeq;
+		const uint32_t armSeq = motorState.sampleArmSeq;
 		if (armSeq != lastSampleArmSeq)
 		{
 			lastSampleArmSeq = armSeq;
-			sampleFilter = motorBlock.sampleFilter;
-			samplesWanted = motorBlock.samplesRequested;
-			sampleIntervalTicks = motorBlock.sampleIntervalTicks;
-			motorBlock.samplesCollected = 0;
-			switch (motorBlock.sampleStartMode)
+			sampleFilter = motorState.sampleFilter;
+			samplesWanted = motorState.samplesRequested;
+			sampleIntervalTicks = motorState.sampleIntervalTicks;
+			motorState.samplesCollected = 0;
+			switch (motorState.sampleStartMode)
 			{
 			case 1:
 				sampleStartTicks = whenNextSampleDue = now;
-				motorBlock.sampleState = MotorSampleState::recording;
+				motorState.sampleState = MotorSampleState::recording;
 				break;
 			case 2:
-				motorBlock.sampleState = MotorSampleState::waitingForMove;
+				motorState.sampleState = MotorSampleState::waitingForMove;
 				break;
 			default:
-				motorBlock.sampleState = MotorSampleState::idle;
+				motorState.sampleState = MotorSampleState::idle;
 				break;
 			}
 		}
 
-		if (motorBlock.sampleState == MotorSampleState::waitingForMove && hasMove)
+		if (motorState.sampleState == MotorSampleState::waitingForMove && hasMove)
 		{
 			sampleStartTicks = whenNextSampleDue = now;
-			motorBlock.sampleState = MotorSampleState::recording;
+			motorState.sampleState = MotorSampleState::recording;
 		}
 
-		if (motorBlock.sampleState == MotorSampleState::recording && (int32_t)(now - whenNextSampleDue) >= 0)
+		if (motorState.sampleState == MotorSampleState::recording && (int32_t)(now - whenNextSampleDue) >= 0)
 		{
-			SampleBuffer *const buf = motorBlock.sampleBuffer;
+			SampleBuffer *const buf = motorState.sampleBuffer;
 			if (buf == nullptr)
 			{
-				motorBlock.sampleState = MotorSampleState::idle;
+				motorState.sampleState = MotorSampleState::idle;
 				return;
 			}
 			if (buf->IsFull())
 			{
-				motorBlock.sampleState = MotorSampleState::overflowed;			// tell core 0 to stop the collection
+				motorState.sampleState = MotorSampleState::overflowed;			// tell core 0 to stop the collection
 				return;
 			}
 
@@ -158,18 +158,18 @@ namespace MotorControl
 			if (sampleFilter & CL_RECORD_PID_V_TERM)  			{ buf->PutF16(lastPIDVTerm); }
 			if (sampleFilter & CL_RECORD_PID_A_TERM)  			{ buf->PutF16(lastPIDATerm); }
 			if (sampleFilter & CL_RECORD_CURRENT_STEP_PHASE)  	{ buf->PutU16((uint16_t)encoder->GetCurrentPhasePosition()); }
-			if (sampleFilter & CL_RECORD_DESIRED_STEP_PHASE)  	{ buf->PutU16(motorBlock.commandedStepPhase); }
+			if (sampleFilter & CL_RECORD_DESIRED_STEP_PHASE)  	{ buf->PutU16(motorState.commandedStepPhase); }
 			if (sampleFilter & CL_RECORD_PHASE_SHIFT)  			{ buf->PutU16(0); }
 			if (sampleFilter & CL_RECORD_COIL_A_CURRENT) 		{ buf->PutI16(lastCoilA); }
 			if (sampleFilter & CL_RECORD_COIL_B_CURRENT) 		{ buf->PutI16(lastCoilB); }
 			buf->FinishSample();
 
 			__asm volatile("dmb" ::: "memory");									// the sample data must be visible to core 0 before the count that publishes it
-			const uint16_t collected = motorBlock.samplesCollected + 1;
-			motorBlock.samplesCollected = collected;
+			const uint16_t collected = motorState.samplesCollected + 1;
+			motorState.samplesCollected = collected;
 			if (collected == samplesWanted)
 			{
-				motorBlock.sampleState = MotorSampleState::complete;
+				motorState.sampleState = MotorSampleState::complete;
 			}
 			whenNextSampleDue += sampleIntervalTicks;
 		}
@@ -181,7 +181,7 @@ namespace MotorControl
 	{
 		for (unsigned int attempt = 0; attempt < 2; ++attempt)
 		{
-			const uint32_t seqBefore = motorBlock.paramSeq;
+			const uint32_t seqBefore = motorState.paramSeq;
 			if (seqBefore == lastParamSeq)
 			{
 				return;												// nothing new
@@ -190,10 +190,10 @@ namespace MotorControl
 			{
 				continue;											// update in progress
 			}
-			const float p = motorBlock.Kp, i = motorBlock.Ki, d = motorBlock.Kd, v = motorBlock.Kv, a = motorBlock.Ka;
-			const float pre = motorBlock.preErrorThreshold, err = motorBlock.errorThreshold;
-			const float hold = motorBlock.holdCurrentFraction;
-			if (motorBlock.paramSeq == seqBefore)
+			const float p = motorState.Kp, i = motorState.Ki, d = motorState.Kd, v = motorState.Kv, a = motorState.Ka;
+			const float pre = motorState.preErrorThreshold, err = motorState.errorThreshold;
+			const float hold = motorState.holdCurrentFraction;
+			if (motorState.paramSeq == seqBefore)
 			{
 				Kp = p; Ki = i; Kd = d; Kv = v; Ka = a;
 				preErrorThreshold = pre; errorThreshold = err;
@@ -205,7 +205,7 @@ namespace MotorControl
 	}
 	// The tuning manoeuvre state machines are shared with the core-0 path: see TuningMoves.h. This
 	// context supplies the kernel-side hooks. Completion side effects are no-ops here because the
-	// kernel signals completion through the block and core 0 performs them (they need FreeRTOS/flash).
+	// kernel signals completion through the shared state and core 0 performs them (they need FreeRTOS/flash).
 	struct KernelTuningContext
 	{
 		Encoder *encoder;
@@ -217,29 +217,29 @@ namespace MotorControl
 	};
 
 	// Run the armed tuning sweep, one manoeuvre step per stepTicksPerTuningStep. Called from Cycle()
-	// in directCommand mode. Arms/aborts are latched from the block via sweepArmSeq. Pacing uses the
+	// in directCommand mode. Arms/aborts are latched from the shared state via sweepArmSeq. Pacing uses the
 	// LOCAL step clock (localNow): movement time can jump backwards when the movement delay changes,
 	// which would stall a comparison-based limiter.
 	TIME_CRITICAL static void RunTuningSweep(uint32_t localNow, Encoder *encoder) noexcept
 	{
-		const uint32_t armSeq = motorBlock.sweepArmSeq;
+		const uint32_t armSeq = motorState.sweepArmSeq;
 		if (armSeq != lastSweepArmSeq)
 		{
 			lastSweepArmSeq = armSeq;
-			sweepKind = motorBlock.sweepKind;
+			sweepKind = motorState.sweepKind;
 			if (sweepKind == MotorSweepKind::none)
 			{
-				motorBlock.sweepState = MotorSweepState::idle;
+				motorState.sweepState = MotorSweepState::idle;
 				return;
 			}
 			sweepFirstIteration = true;
-			sweepPhase = motorBlock.commandedStepPhase;				// continue from the last commanded phase (core 0 energised it before arming)
+			sweepPhase = motorState.commandedStepPhase;				// continue from the last commanded phase (core 0 energised it before arming)
 			whenLastSweepStep = localNow;							// the first step happens one interval after arming
-			motorBlock.sweepIterations = 0;
-			motorBlock.sweepState = MotorSweepState::running;
+			motorState.sweepIterations = 0;
+			motorState.sweepState = MotorSweepState::running;
 		}
 
-		if (motorBlock.sweepState != MotorSweepState::running)
+		if (motorState.sweepState != MotorSweepState::running)
 		{
 			return;
 		}
@@ -256,10 +256,10 @@ namespace MotorControl
 								? BasicTuningMove(ctx, sweepFirstIteration)
 									: EncoderCalibrationMove(ctx, sweepFirstIteration);
 		sweepFirstIteration = false;
-		motorBlock.sweepIterations = motorBlock.sweepIterations + 1;
+		motorState.sweepIterations = motorState.sweepIterations + 1;
 		if (finished)
 		{
-			motorBlock.sweepState = MotorSweepState::done;			// core 0 performs the completion
+			motorState.sweepState = MotorSweepState::done;			// core 0 performs the completion
 		}
 	}
 
@@ -269,7 +269,7 @@ namespace MotorControl
 	// generation. In openLoopStep mode this runs at the host loop's poll rate, microseconds apart.
 	TIME_CRITICAL void KernelYieldPoll() noexcept
 	{
-		if (motorBlock.stepTestRequest == 1)
+		if (motorState.stepTestRequest == 1)
 		{
 			// Bench diagnostic: emit test pulses from THIS core via the SIO GPIO registers (the same
 			// mechanism the ISR stepping path uses from core 0) so cross-core GPIO problems can be
@@ -277,7 +277,7 @@ namespace MotorControl
 			// pads" conclusions were artifacts: MSCNT deltas alias to zero for x16 pulse counts that
 			// are multiples of 64, and the G1-path pulses were too narrow for the TMC's filtered
 			// STEP input. Read back CTRL/STATUS/SIO so core 0 can report write delivery regardless.
-			const uint32_t mask = motorBlock.stepPollMask;
+			const uint32_t mask = motorState.stepPollMask;
 			unsigned int pin = 0;
 			while (pin < 31 && (mask & (1u << pin)) == 0) { ++pin; }
 			// 500us high/low paced by the step timer: slow enough for the rotor to physically follow,
@@ -288,10 +288,10 @@ namespace MotorControl
 				sio_hw->gpio_set = mask;
 				if (n == 0)
 				{
-					motorBlock.stepTestCtrlWritten = mask;
-					motorBlock.stepTestCtrlReadback = io_bank0_hw->io[pin].ctrl;
-					motorBlock.stepTestStatusHigh = io_bank0_hw->io[pin].status;
-					motorBlock.stepTestSioReadback = sio_hw->gpio_out;
+					motorState.stepTestCtrlWritten = mask;
+					motorState.stepTestCtrlReadback = io_bank0_hw->io[pin].ctrl;
+					motorState.stepTestStatusHigh = io_bank0_hw->io[pin].status;
+					motorState.stepTestSioReadback = sio_hw->gpio_out;
 				}
 				uint32_t t0 = StepTimer::GetTimerTicks();
 				while (StepTimer::GetTimerTicks() - t0 < halfPeriodTicks) { }
@@ -299,9 +299,9 @@ namespace MotorControl
 				t0 = StepTimer::GetTimerTicks();
 				while (StepTimer::GetTimerTicks() - t0 < halfPeriodTicks) { }
 			}
-			motorBlock.stepTestRequest = 2;
+			motorState.stepTestRequest = 2;
 		}
-		if (motorBlock.mode == MotorMode::openLoopStep)
+		if (motorState.mode == MotorMode::openLoopStep)
 		{
 			MotorControlStepPoll();
 		}
@@ -311,8 +311,8 @@ namespace MotorControl
 	// (ClosedLoopMode::closed branch); see the file header comment.
 	TIME_CRITICAL void Cycle() noexcept
 	{
-		const MotorMode mode = motorBlock.mode;
-		Encoder *const encoder = motorBlock.encoder;
+		const MotorMode mode = motorState.mode;
+		Encoder *const encoder = motorState.encoder;
 		if (mode == MotorMode::idle || mode == MotorMode::openLoopStep || encoder == nullptr)
 		{
 			// idle: core 0 owns the encoder and the motor. openLoopStep: stepping happens in
@@ -327,21 +327,21 @@ namespace MotorControl
 		if (prevCycleTimeValid)
 		{
 			timeElapsed = cycleStartTime - prevCycleStartTime;
-			if (timeElapsed < motorBlock.minCycleInterval) { motorBlock.minCycleInterval = timeElapsed; }
-			if (timeElapsed > motorBlock.maxCycleInterval) { motorBlock.maxCycleInterval = timeElapsed; }
+			if (timeElapsed < motorState.minCycleInterval) { motorState.minCycleInterval = timeElapsed; }
+			if (timeElapsed > motorState.maxCycleInterval) { motorState.maxCycleInterval = timeElapsed; }
 		}
 		prevCycleStartTime = cycleStartTime;
 		prevCycleTimeValid = true;
 
 		// Handle a reset request (mode entry or gain change): clear the integrator, filters and latches
-		const uint32_t rs = motorBlock.resetSeq;
+		const uint32_t rs = motorState.resetSeq;
 		if (rs != lastResetSeq)
 		{
 			lastResetSeq = rs;
 			PIDITerm = 0.0;
 			errorDerivativeFilter.Reset();
 			speedFilter.Reset();
-			motorBlock.stall = motorBlock.preStall = false;
+			motorState.stall = motorState.preStall = false;
 		}
 
 		RefreshParams();
@@ -349,11 +349,11 @@ namespace MotorControl
 		// Read the encoder; the rest of the cycle is gated on this succeeding, as in the ported code
 		if (!encoder->TakeReading())
 		{
-			motorBlock.encoderReadOk = false;
-			motorBlock.encoderFailCount = motorBlock.encoderFailCount + 1;
+			motorState.encoderReadOk = false;
+			motorState.encoderFailCount = motorState.encoderFailCount + 1;
 			return;
 		}
-		motorBlock.encoderReadOk = true;
+		motorState.encoderReadOk = true;
 
 		// Evaluate the trajectory and compute the position error in full steps
 		const uint32_t now = StepTimer::ConvertLocalToMovementTime(cycleStartTime);
@@ -375,15 +375,15 @@ namespace MotorControl
 		speedFilter.ProcessReading((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
 
 		const uint32_t measuredStepPhase = encoder->GetCurrentPhasePosition();
-		motorBlock.encoderCount = encoder->GetCurrentCount();
-		motorBlock.positionError = currentPositionError;
-		motorBlock.measuredStepPhase = (uint16_t)measuredStepPhase;
+		motorState.encoderCount = encoder->GetCurrentCount();
+		motorState.positionError = currentPositionError;
+		motorState.measuredStepPhase = (uint16_t)measuredStepPhase;
 
 		float currentFraction = 0.0;
 		if (mode == MotorMode::directCommand)
 		{
 			RunTuningSweep(cycleStartTime, encoder);				// paced on the local step clock, not movement time
-			const MotorSweepState sweepState = motorBlock.sweepState;
+			const MotorSweepState sweepState = motorState.sweepState;
 			if (sweepState == MotorSweepState::running)
 			{
 				currentFraction = 1.0;								// the sweep commands full current
@@ -391,12 +391,12 @@ namespace MotorControl
 			else if (sweepState == MotorSweepState::idle)
 			{
 				// Apply core 0's commanded phase and current verbatim (seqlock read; skip on a torn snapshot)
-				const uint32_t seqBefore = motorBlock.commandSeq;
+				const uint32_t seqBefore = motorState.commandSeq;
 				if ((seqBefore & 1u) == 0)
 				{
-					const uint16_t phase = motorBlock.commandedPhase;
-					const float fraction = motorBlock.commandedCurrentFraction;
-					if (motorBlock.commandSeq == seqBefore)
+					const uint16_t phase = motorState.commandedPhase;
+					const float fraction = motorState.commandedCurrentFraction;
+					if (motorState.commandSeq == seqBefore)
 					{
 						SetMotorPhase(phase, fraction);
 						currentFraction = fraction;
@@ -408,13 +408,13 @@ namespace MotorControl
 		}
 		else
 		{
-			// Closed loop / assisted open loop - the control mathematics live in ControlLaw.h,
+			// Closed loop / assisted open loop - the control mathematics live in MotorControlMath.h,
 			// shared verbatim with ClosedLoop::ControlMotorCurrents. The last* statics bound here
 			// feed the M569.5 sample stream.
 			uint16_t commandedStepPhase;
 			if (mode == MotorMode::closedLoop)
 			{
-				MotorControlLaw::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
+				MotorControlMath::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
 									currentPositionError, errorDerivativeFilter.GetDerivative(), speedFilter.GetDerivative(),
 									mParams.speed, mParams.acceleration, timeElapsed, measuredStepPhase,
 									lastPIDPTerm, PIDITerm, lastPIDDTerm, lastPIDVTerm, lastPIDATerm, lastPIDControlSignal,
@@ -422,41 +422,41 @@ namespace MotorControl
 			}
 			else
 			{
-				MotorControlLaw::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
+				MotorControlMath::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
 									currentPositionError, errorDerivativeFilter.GetDerivative(),
 									mParams.speed, mParams.acceleration,
-									mParams.position, motorBlock.phaseOffset, holdCurrentFraction,
+									mParams.position, motorState.phaseOffset, holdCurrentFraction,
 									lastPIDPTerm, lastPIDDTerm, lastPIDVTerm, lastPIDATerm, lastPIDControlSignal,
 									commandedStepPhase, currentFraction);
 			}
 			SetMotorPhase(commandedStepPhase, currentFraction);
 
 			// Stall / pre-stall detection - shared hysteresis; the fault event is deferred to core 0
-			bool stall = motorBlock.stall, preStall = motorBlock.preStall;
-			if (MotorControlLaw::UpdateStallDetection(fabsf(currentPositionError), preErrorThreshold, errorThreshold, stall, preStall))
+			bool stall = motorState.stall, preStall = motorState.preStall;
+			if (MotorControlMath::UpdateStallDetection(fabsf(currentPositionError), preErrorThreshold, errorThreshold, stall, preStall))
 			{
-				motorBlock.faultPending = true;						// core 0 turns this into the driver-fault event (it needs FreeRTOS)
+				motorState.faultPending = true;						// core 0 turns this into the driver-fault event (it needs FreeRTOS)
 			}
-			motorBlock.stall = stall;
-			motorBlock.preStall = preStall;
+			motorState.stall = stall;
+			motorState.preStall = preStall;
 		}
-		motorBlock.currentFraction = currentFraction;
+		motorState.currentFraction = currentFraction;
 
 		SampleStream(now, hasMove, encoder, mParams, currentPositionError);
 
 		// Statistics for the periodic report (core 0 reads and resets these)
 		const float absPositionError = fabsf(currentPositionError);
-		if (absPositionError > motorBlock.statMaxAbsError) { motorBlock.statMaxAbsError = absPositionError; }
-		motorBlock.statSumSqError += fsquare(currentPositionError);
-		if (currentFraction > motorBlock.statMaxCurrentFraction) { motorBlock.statMaxCurrentFraction = currentFraction; }
-		motorBlock.statSumCurrentFraction += currentFraction;
-		++motorBlock.statSampleCount;
-		++motorBlock.cycleCount;
+		if (absPositionError > motorState.statMaxAbsError) { motorState.statMaxAbsError = absPositionError; }
+		motorState.statSumSqError += fsquare(currentPositionError);
+		if (currentFraction > motorState.statMaxCurrentFraction) { motorState.statMaxCurrentFraction = currentFraction; }
+		motorState.statSumCurrentFraction += currentFraction;
+		++motorState.statSampleCount;
+		++motorState.cycleCount;
 
 		// Cycle runtime statistics
 		const StepTimer::Ticks cycleRuntime = StepTimer::GetTimerTicks() - cycleStartTime;
-		if (cycleRuntime < motorBlock.minCycleRuntime) { motorBlock.minCycleRuntime = cycleRuntime; }
-		if (cycleRuntime > motorBlock.maxCycleRuntime) { motorBlock.maxCycleRuntime = cycleRuntime; }
+		if (cycleRuntime < motorState.minCycleRuntime) { motorState.minCycleRuntime = cycleRuntime; }
+		if (cycleRuntime > motorState.maxCycleRuntime) { motorState.maxCycleRuntime = cycleRuntime; }
 	}
 }
 
