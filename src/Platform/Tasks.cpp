@@ -942,7 +942,27 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 				Core1Runtime::GetHeartbeat(), Core1Runtime::GetResetAttempts(),
 				Core1Runtime::GetLaunchProgress(), Core1Runtime::GetLaunchRetries(),
 				Core1Runtime::LaunchFailed() ? " LAUNCH-FAILED" : "");
+	{
+		int parkDepth;
+		bool parkRequested, isParked;
+		uint32_t parkAcquisitions, parkTimeouts;
+		Core1Runtime::GetParkDiagnostics(parkDepth, parkRequested, isParked, parkAcquisitions, parkTimeouts);
+		reply.catf(", park %d/%u/%u/%" PRIu32 "/%" PRIu32,		// depth/requested/parked/acquisitions/timeouts
+					parkDepth, (unsigned int)parkRequested, (unsigned int)isParked, parkAcquisitions, parkTimeouts);
+	}
 #endif
+	// Report the owned mutexes BEFORE the task list: when the reply buffer is tight this is the
+	// line that explains a task shown running above its base priority (mutex priority inheritance)
+	reply.lcat("Owned mutexes:");
+	for (const Mutex *m = Mutex::GetMutexList(); m != nullptr; m = m->GetNext())
+	{
+		const TaskHandle holder = m->GetHolder();
+		if (holder != nullptr)
+		{
+			reply.catf(" %s(%s)", m->GetName(), pcTaskGetName(holder->GetFreeRTOSHandle()));
+		}
+	}
+
 	reply.lcat("Tasks:");
 
 	// Now the per-task memory report
@@ -984,7 +1004,16 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 
 		const float cpuPercent = (100 * (float)taskDetails.ulRunTimeCounter)/(float)timeSinceLastCall;
 		totalCpuPercent += cpuPercent;
+		if (taskDetails.uxCurrentPriority != taskDetails.uxBasePriority)
+	{
+		// The task's priority is raised by mutex priority inheritance; show base too, because a
+		// chronically boosted spin task starves its base-priority peers (seen with EncCal)
+		reply.catf(" %s(%u^%u,%s", taskDetails.pcTaskName, (unsigned int)taskDetails.uxCurrentPriority, (unsigned int)taskDetails.uxBasePriority, stateText);
+	}
+	else
+	{
 		reply.catf(" %s(%u,%s", taskDetails.pcTaskName, (unsigned int)taskDetails.uxCurrentPriority, stateText);
+	}
 		switch (taskDetails.eCurrentState)
 		{
 		case esResourceWaiting:
@@ -1013,16 +1042,7 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 		// Print the free stack space in words. The -4 is needed because the FreeRTOS stack overflow check is triggered if any of the last 4 words is used.
 		reply.catf(",%.1f%%,%u)", (double)cpuPercent, (unsigned int)taskDetails.usStackHighWaterMark - 4);
 	}
-	reply.catf(", total %.1f%%\nOwned mutexes:", (double)totalCpuPercent);
-
-	for (const Mutex *m = Mutex::GetMutexList(); m != nullptr; m = m->GetNext())
-	{
-		const TaskHandle holder = m->GetHolder();
-		if (holder != nullptr)
-		{
-			reply.catf(" %s(%s)", m->GetName(), pcTaskGetName(holder->GetFreeRTOSHandle()));
-		}
-	}
+	reply.catf(", total %.1f%%", (double)totalCpuPercent);
 
 	// Show the up time and reason for the last reset
 	const uint32_t now = (uint32_t)(millis64()/1000u);		// get up time in seconds

@@ -39,6 +39,8 @@ namespace Core1Runtime
 	static bool started = false;
 	static std::atomic<int> parkDepth(0);
 	static Core1EntryFn core1Entry = nullptr;
+	static volatile uint32_t parkTimeouts = 0;				// times Park() gave up waiting for the acknowledgement (its caller proceeded unparked)
+	static volatile uint32_t parkCount = 0;					// total park acquisitions (diagnostics)
 
 	// Diagnostics for the core-1 relaunch (surfaced by the 'D' USB report). On RP2350 a watchdog
 	// reset does not power-cycle core 1, so after a firmware update or software reset core 1 has been
@@ -264,25 +266,34 @@ namespace Core1Runtime
 			// flash/NVM write, which it must not; return without blocking so we do not crash.
 			return false;
 		}
-		if (parkDepth.fetch_add(1) != 0)
+		if (parkDepth.fetch_add(1) == 0)
 		{
-			return parked || !started;							// someone else already requested the park
+			if (!started)
+			{
+				return true;									// nothing running on core 1, so it is trivially parked
+			}
+			parkRequested = true;
+			__sev();
 		}
-		if (!started)
+		else if (!started)
 		{
-			return true;										// nothing running on core 1, so it is trivially parked
+			return true;
 		}
-		parkRequested = true;
-		__sev();
+		// Wait for the acknowledgement even when another parker requested the park first: it may still
+		// be acquiring, and returning early would let this caller mutate core-1-shared state (encoder,
+		// flash/XIP, LUT) while core 1 is still running. That race was seen on the bench as concurrent
+		// M122 handling during a calibration store leaving the encoder broken and the store incomplete.
 		const uint32_t startTime = millis();
 		while (!parked)
 		{
 			if (millis() - startTime >= 50)
 			{
+				parkTimeouts = parkTimeouts + 1;
 				return false;									// proceed anyway; no worse than not having waited
 			}
 			delay(1);
 		}
+		parkCount = parkCount + 1;
 		return true;
 	}
 
@@ -326,6 +337,15 @@ namespace Core1Runtime
 
 	uint32_t GetHeartbeat() noexcept { return heartbeat; }
 	bool IsParked() noexcept { return parked; }
+
+	void GetParkDiagnostics(int& depth, bool& requested, bool& isParked, uint32_t& acquisitions, uint32_t& timeouts) noexcept
+	{
+		depth = parkDepth.load();
+		requested = parkRequested;
+		isParked = parked;
+		acquisitions = parkCount;
+		timeouts = parkTimeouts;
+	}
 	bool LaunchFailed() noexcept { return launchFailed; }
 	uint32_t GetResetAttempts() noexcept { return lastResetAttempts; }
 	bool LaunchInProgress() noexcept { return launchInProgress; }

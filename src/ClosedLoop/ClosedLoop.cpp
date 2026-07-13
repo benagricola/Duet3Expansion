@@ -117,6 +117,10 @@ constexpr size_t TuningTaskStackWords = 300;						// stack for the tuning sequen
 static Task<TuningTaskStackWords> *tuningTask = nullptr;			// Tuning task - sequences tuning manoeuvres by driving the core-1 kernel's direct-command mode
 #endif
 
+#if MNB_USB_DIAG
+static ClosedLoop *benchProbeInstance = nullptr;					// lets the static USB bench probes read instance tuning/calibration state (single-driver board)
+#endif
+
 extern "C" [[noreturn]] void DataTransmissionTaskEntry(void *param) noexcept
 {
 	((ClosedLoop*)param)->DataTransmissionTaskLoop();
@@ -231,6 +235,10 @@ void ClosedLoop::InitInstance() noexcept
 	speedFilter.Reset();
 
 	UpdateStandstillCurrent();
+
+#if MNB_USB_DIAG
+	benchProbeInstance = this;
+#endif
 
 	// Set up the data transmission task
 	dataTransmissionTask = new Task<DataCollectionTaskStackWords>;
@@ -1485,7 +1493,12 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 				xdFrames, xdPhase, gconf, (unsigned int)motorBlock.sweepState, motorBlock.sweepIterations,
 				motorBlock.stepPollCalls, motorBlock.stepsEmitted, motorBlock.stepPollMask,
 				motorBlock.stepGapMinTicks, motorBlock.stepGapMaxTicks);
-	reply.catf(" dirsteps=%" PRIu32 "/%" PRIu32, motorBlock.stepsDirHigh, motorBlock.stepsDirLow);
+	reply.catf(" dirsteps=%" PRIu32 "/%" PRIu32 " encfail=%" PRIu32, motorBlock.stepsDirHigh, motorBlock.stepsDirLow, motorBlock.encoderFailCount);
+	if (benchProbeInstance != nullptr)
+	{
+		reply.catf(" tun=%#x terr=%#x cal=%u", (unsigned int)benchProbeInstance->tuning, (unsigned int)benchProbeInstance->tuningError,
+					(unsigned int)benchProbeInstance->calibrationState);
+	}
 #else
 	reply.printf("PLIVE t=%" PRIu32 " target=%.3f tcounts=%.1f enc=%" PRIi32 " err=%.3f",
 				benchLiveWhen, (double)benchLiveTarget, (double)benchLiveTargetCounts, benchLiveEncCounts, (double)benchLiveErr);

@@ -55,6 +55,7 @@ namespace Core1Runtime
 
 	uint32_t GetHeartbeat() noexcept;				// increments continuously while the core-1 loop is alive
 	bool IsParked() noexcept;
+	void GetParkDiagnostics(int& depth, bool& requested, bool& isParked, uint32_t& acquisitions, uint32_t& timeouts) noexcept;	// bench diagnostics for the park handshake
 	bool LaunchFailed() noexcept;					// true if Start() could not bring core 1 up and booted without it
 	uint32_t GetResetAttempts() noexcept;			// force-off/on attempts the last core-1 reset needed (diagnostics)
 	bool LaunchInProgress() noexcept;				// true inside Start()'s reset/launch window; vApplicationTickHook suspends the watchdog kick while set

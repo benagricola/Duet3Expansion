@@ -49,7 +49,13 @@ extern "C" bool DRV_SPI_Initialize()
 	debugPrintf("SPI init start\n");
 	spiCanHardware = new SharedSpiClient(Platform::GetSharedSpi(spiCan_SpiChannel), 15000000, SpiMode::mode0, NoPin, false);
 	IoPort::SetPinMode(SPICanCsPin, OUTPUT_HIGH);
-	spiCanHardware->Select(1000);
+	// Configure the bus without taking its mutex: the bus is dedicated to the CAN chip and all
+	// transactions are already serialised by the CAN driver's own mutex. Holding the bus mutex
+	// forever (the old Select(1000) here) is not harmless: FreeRTOS only restores a task's base
+	// priority when it holds NO mutexes, so any transient priority boost inherited by the task
+	// that ran this init latched permanently and starved its base-priority peers - seen on the
+	// bench as the encoder calibration task never completing (M569.6 hanging the main board).
+	spiCanHardware->SelectNoMutex();
 	debugPrintf("SPI init complete\n");
     return true;
 }

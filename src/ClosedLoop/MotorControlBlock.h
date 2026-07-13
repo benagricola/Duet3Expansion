@@ -181,6 +181,7 @@ struct MotorControlBlock
 	volatile uint32_t stepLastTicks = 0;						// bench: tick time of the last emitted step; 0 = no step since reset
 	volatile uint32_t stepsDirHigh = 0;							// bench: steps emitted while the physical DIR pin read back high (reset by BenchTelemetryReset)
 	volatile uint32_t stepsDirLow = 0;							// bench: steps emitted while the physical DIR pin read back low - a ~50/50 split on a one-way move means the commanded direction is alternating
+	volatile uint32_t encoderFailCount = 0;						// kernel: cumulative failed encoder TakeReading() calls (a climbing count with encok=0 means the encoder is persistently broken)
 
 	// ---- Sample streaming (M569.5): armed by core 0, executed by the kernel ------------------------
 	// The kernel packs samples straight into the shared SampleBuffer, exactly as the pre-kernel

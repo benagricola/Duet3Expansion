@@ -1165,9 +1165,9 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v41 shared control law\n");
+			debugPrintf("Bench: v45 canspi mutex fix\n");
 # endif
-			String<StringLength256> reply;
+			String<700> reply;
 			Tasks::Diagnostics(reply.GetRef());
 			debugPrintf("%s\n", reply.c_str());
 			reply.Clear();

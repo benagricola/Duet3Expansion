@@ -350,6 +350,7 @@ namespace MotorControl
 		if (!encoder->TakeReading())
 		{
 			motorBlock.encoderReadOk = false;
+			motorBlock.encoderFailCount = motorBlock.encoderFailCount + 1;
 			return;
 		}
 		motorBlock.encoderReadOk = true;
