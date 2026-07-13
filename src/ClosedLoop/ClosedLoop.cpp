@@ -1680,8 +1680,8 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 #if TMC_ON_CORE1
 	// From the kernel's shared state. Note poserr_max is since the last statistics period
 	// (the mainboard's regular status polls reset it), not since the 'Z' command.
-	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
-				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.statMaxAbsError);
+	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f vmax=%.0ffs/s trajmax=%.0ffs/s",
+				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.statMaxAbsError, (double)motorState.statMaxSpeedFs, (double)motorState.statMaxTrajSpeedFs);
 # if SUPPORT_PHASE_ADVANCE
 	reply.catf(" advmax=%.1fdeg", (double)((float)motorState.maxPhaseAdvanceCounts * (360.0/4096.0)));
 # endif
@@ -1760,6 +1760,8 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	benchTelMaxAbsPosErr = 0.0;
 	benchTelResetMs = millis();
 #if TMC_ON_CORE1
+	motorState.statMaxSpeedFs = 0;
+	motorState.statMaxTrajSpeedFs = 0;
 # if SUPPORT_PHASE_ADVANCE
 	motorState.maxPhaseAdvanceCounts = 0;
 # endif

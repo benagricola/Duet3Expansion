@@ -386,6 +386,16 @@ namespace MotorControl
 		const float currentPositionError = (float)(targetEncoderReading - (float)encoder->GetCurrentCount()) * encoder->GetStepsPerCount();
 		errorDerivativeFilter.ProcessReading(currentPositionError, now);
 		speedFilter.ProcessReading((float)encoder->GetCurrentCount() * encoder->GetStepsPerCount(), now);
+		{
+			// Bench telemetry: the true measured speed, timed by the step clock (host-side timing of
+			// encoder reads over USB has enough latency jitter to misread sustained speeds by ~25%)
+			const float absSpeedFs = fabsf(speedFilter.GetDerivative()) * (float)StepTimer::StepClockRate;
+			if (absSpeedFs > motorState.statMaxSpeedFs) { motorState.statMaxSpeedFs = absSpeedFs; }
+			// ...and the trajectory's own speed, so a capped commanded profile is distinguishable
+			// from a saturated motor
+			const float absTrajFs = fabsf(mParams.speed) * (float)StepTimer::StepClockRate;
+			if (absTrajFs > motorState.statMaxTrajSpeedFs) { motorState.statMaxTrajSpeedFs = absTrajFs; }
+		}
 
 		const uint32_t measuredStepPhase = encoder->GetCurrentPhasePosition();
 		motorState.encoderCount = encoder->GetCurrentCount();

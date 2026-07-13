@@ -1165,7 +1165,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v48 advance+flux\n");
+			debugPrintf("Bench: v50 trajmax\n");
 # endif
 			String<700> reply;
 			Tasks::Diagnostics(reply.GetRef());

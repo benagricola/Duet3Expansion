@@ -133,6 +133,8 @@ struct MotorControlState
 	volatile uint32_t fluxBrakeCycles = 0;						// control cycles that injected braking current
 	volatile uint16_t fluxBrakeMaxOvershootMv = 0;				// largest supply overshoot seen while braking was possible
 	volatile uint16_t vsMaxMv = 0;								// highest plausible supply-voltage sample seen (bench telemetry)
+	volatile float statMaxSpeedFs = 0;							// largest |measured speed| seen, full steps/sec (bench telemetry; kernel speed filter, StepClock-timed)
+	volatile float statMaxTrajSpeedFs = 0;						// largest |trajectory speed| seen, full steps/sec (bench telemetry; from the move segments the kernel tracks)
 
 	// Direct command (directCommand mode). Written as a group under commandSeq.
 	volatile uint32_t commandSeq = 0;
