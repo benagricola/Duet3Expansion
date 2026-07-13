@@ -135,6 +135,7 @@ struct MotorControlState
 	volatile uint16_t vsMaxMv = 0;								// highest plausible supply-voltage sample seen (bench telemetry)
 	volatile float statMaxSpeedFs = 0;							// largest |measured speed| seen, full steps/sec (bench telemetry; kernel speed filter, StepClock-timed)
 	volatile float statMaxTrajSpeedFs = 0;						// largest |trajectory speed| seen, full steps/sec (bench telemetry; from the move segments the kernel tracks)
+	volatile float benchMaxAbsError = 0;						// largest |position error| seen, full steps, cleared ONLY by the bench 'Z' command - statMaxAbsError is read-and-reset by the main board's regular status polls, which silently hides mid-move errors from bench reads
 
 	// Direct command (directCommand mode). Written as a group under commandSeq.
 	volatile uint32_t commandSeq = 0;

@@ -511,6 +511,7 @@ namespace MotorControl
 		// Statistics for the periodic report (core 0 reads and resets these)
 		const float absPositionError = fabsf(currentPositionError);
 		if (absPositionError > motorState.statMaxAbsError) { motorState.statMaxAbsError = absPositionError; }
+		if (absPositionError > motorState.benchMaxAbsError) { motorState.benchMaxAbsError = absPositionError; }
 		motorState.statSumSqError += fsquare(currentPositionError);
 		if (currentFraction > motorState.statMaxCurrentFraction) { motorState.statMaxCurrentFraction = currentFraction; }
 		motorState.statSumCurrentFraction += currentFraction;

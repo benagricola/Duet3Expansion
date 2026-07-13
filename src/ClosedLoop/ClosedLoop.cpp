@@ -1678,10 +1678,11 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 /*static*/ void ClosedLoop::BenchTelemetryReport(const StringRef& reply) noexcept
 {
 #if TMC_ON_CORE1
-	// From the kernel's shared state. Note poserr_max is since the last statistics period
-	// (the mainboard's regular status polls reset it), not since the 'Z' command.
+	// From the kernel's shared state. poserr_max uses the bench accumulator (cleared only by 'Z'):
+	// the statistics-period accumulator is read-and-reset by the main board's regular status polls,
+	// which was measured hiding a 6880-full-step saturation lag from a post-move bench read.
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f vmax=%.0ffs/s trajmax=%.0ffs/s",
-				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.statMaxAbsError, (double)motorState.statMaxSpeedFs, (double)motorState.statMaxTrajSpeedFs);
+				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.benchMaxAbsError, (double)motorState.statMaxSpeedFs, (double)motorState.statMaxTrajSpeedFs);
 # if SUPPORT_PHASE_ADVANCE
 	reply.catf(" advmax=%.1fdeg", (double)((float)motorState.maxPhaseAdvanceCounts * (360.0/4096.0)));
 # endif
@@ -1762,6 +1763,7 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 #if TMC_ON_CORE1
 	motorState.statMaxSpeedFs = 0;
 	motorState.statMaxTrajSpeedFs = 0;
+	motorState.benchMaxAbsError = 0;
 # if SUPPORT_PHASE_ADVANCE
 	motorState.maxPhaseAdvanceCounts = 0;
 # endif
