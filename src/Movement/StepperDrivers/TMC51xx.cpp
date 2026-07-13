@@ -92,7 +92,15 @@ constexpr float MaxStandstillCurrent = MaxMotorCurrent * 0.707;
 // - too low and we won't detect stalls quickly enough
 // There are 40 bits to send per driver
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#if TMC_TYPE == 2240
+constexpr uint32_t DriversSpiClockFrequency = 10000000;		// the TMC2240's SPI receiver is independent of its internal system clock (datasheet: "SPI max
+															// frequency is at 10MHz. SCK is independent from the clock frequency of the system"), unlike
+															// the TMC5160/2160 whose SCK limit derives from their fCLK. 10MHz is the specified maximum
+															// and divides exactly from the 200MHz peripheral clock; it halves the two 5-byte frames in
+															// the direct-mode control cycle (~20us -> ~8us)
+#else
 constexpr uint32_t DriversSpiClockFrequency = 4000000;		// 4MHz SPI clock, this is the maximum rate the TMC5160/2160 support using the internal clock
+#endif
 constexpr uint32_t DefaultSpiSleepMicroseconds = 500;		// Sleep time used for tmcTask when not phase stepping
 constexpr uint32_t PhaseStepSpiSleepMicroseconds = 125;		// Sleep time used for tmcTask when phase stepping
 
