@@ -44,6 +44,9 @@ namespace SmartDrivers
 	uint16_t GetMicrostepPosition(size_t driver) noexcept;
 	void SetTmcExternalClock(uint32_t frequency) noexcept;
 	bool SetMotorPhases(size_t driver, uint32_t regVal) noexcept;
+#if SUPPORT_FLUX_BRAKING
+	uint16_t GetSupplyVoltageAdcReading(size_t driver) noexcept;	// raw TMC2240 ADC_VSUPPLY reading, 9.732mV per count
+#endif
 # if MNB_USB_DIAG
 	void GetBenchXdirectDiag(uint32_t& frames, uint32_t& phaseToSet, uint32_t& gconfShadow) noexcept;	// bench diagnostic for the coil-current path
 # endif

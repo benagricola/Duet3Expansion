@@ -196,6 +196,58 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 # endif
 }
 
+#if SUPPORT_FLUX_BRAKING
+
+// Set the motor currents to the vector sum of the torque-producing component (phase/magnitude, at about
+// 90deg electrical to the rotor) and a flux-braking component along the measured rotor axis
+// (rotorPhase/brakeMagnitude), which produces no torque but dissipates regenerated energy in the motor
+// windings. Only reached from ControlMotorCurrents, so never while the core-1 kernel owns the motor.
+void ClosedLoop::SetMotorPhaseAndFluxBrake(uint16_t phase, float magnitude, uint16_t rotorPhase, float brakeMagnitude) noexcept
+{
+	desiredStepPhase = phase;
+	MotorControlMath::ComputeCoilCurrents(phase, magnitude, rotorPhase, brakeMagnitude, coilA, coilB);
+# if (SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI) && SINGLE_DRIVER
+	SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
+# else
+#  error Multi driver code not implemented
+# endif
+}
+
+// Maintain the supply-voltage baseline and return the d-axis current fraction to inject; the baseline
+// and injection mathematics are shared with the core-1 kernel (MotorControlMath.h), this wrapper adds
+// the supply-voltage source and its validity window
+float ClosedLoop::GetFluxBrakeCurrentFraction(float torqueCurrentFraction) noexcept
+{
+# if (SUPPORT_TMC51xx || SUPPORT_TMC2240_SPI) && SUPPORT_TMC2240
+	// Prefer the TMC2240's own supply-voltage ADC (9.732mV per count), which is refreshed in the driver register rotation every few control cycles
+	const uint16_t vsMv = (uint16_t)(((uint32_t)SmartDrivers::GetSupplyVoltageAdcReading(driverNumber) * 9732u)/1000u);
+	if (vsMv < 3000 || vsMv > 40000)
+	{
+		// The 12-bit ADC cannot read above 39.9V and a motor cannot run below 3V, so anything outside
+		// that window is an unrefreshed or corrupted register value. Acting on it would corrupt the
+		// baseline and/or inject braking current on a phantom regeneration overshoot.
+		return 0.0;
+	}
+# elif HAS_VOLTAGE_MONITOR
+	// Otherwise use the board's Vin monitor
+	const uint16_t vsMv = (uint16_t)lrintf(constrain<float>(Platform::GetCurrentVinVoltage(), 0.0, 65.0) * 1000.0);
+# else
+#  error SUPPORT_FLUX_BRAKING requires a driver supply-voltage ADC or a board Vin monitor
+# endif
+	uint16_t overshoot;
+	const float fraction = MotorControlMath::ComputeFluxBrakeFraction(vsMv, vsBaselineMv, vsBaselineDivider,
+										fluxBrakeEnabled, fluxBrakeOnsetDeltaMv, fluxBrakeRecipRangeMv,
+										fluxBrakeMaxFraction, torqueCurrentFraction, overshoot);
+	if (fluxBrakeEnabled && overshoot > fluxBrakeOnsetDeltaMv)
+	{
+		if (overshoot > fluxBrakeMaxOvershootMv) { fluxBrakeMaxOvershootMv = overshoot; }
+		++fluxBrakeCycles;
+	}
+	return fraction;
+}
+
+#endif	// SUPPORT_FLUX_BRAKING
+
 #if SAME5x	// only SAME5x boards generate an external TMC clock via a GCLK; on other boards (e.g. the TMC2240) the driver uses its internal oscillator
 static_assert(TmcClockGclkNumber == GclkNumApp1 || TmcClockGclkNumber == GclkNumApp2);	// check that this GCLK number has been reserved for application use
 
@@ -246,6 +298,9 @@ void ClosedLoop::InitInstance() noexcept
 
 #if TMC_ON_CORE1
 	PublishControlParameters(true);						// give the core-1 kernel the default gains and thresholds
+# if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+	PublishFeatureConfig();								// and the feature (flux braking / phase advance) defaults
+# endif
 	motorState.sampleBuffer = &sampleBuffer;			// where the kernel packs diagnostic samples (M569.5)
 	Core1Runtime::SetYieldPoll(MotorControl::KernelYieldPoll);	// open-loop step generation (runs before core 1 is launched, so no race)
 #endif
@@ -1365,9 +1420,164 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 								commandedStepPhase, currentFraction);
 		}
 	}
+
+#if SUPPORT_PHASE_ADVANCE
+	if (phaseAdvanceEnabled && (inTorqueMode || currentMode == ClosedLoopMode::closed))
+	{
+		const float stepsPerSec = speedFilter.GetDerivative() * (float)StepTimer::StepClockRate;	// signed full steps/sec
+		uint16_t advanceCounts;
+		commandedStepPhase = MotorControlMath::ApplyPhaseAdvance(stepsPerSec, phaseAdvanceStartStepsPerSec,
+								phaseAdvanceCountsPerStepPerSec, phaseAdvanceMaxCountsLimit, commandedStepPhase, advanceCounts);
+		if (advanceCounts > maxPhaseAdvanceCounts) { maxPhaseAdvanceCounts = advanceCounts; }
+	}
+#endif
+
+#if SUPPORT_FLUX_BRAKING
+	const float fluxBrakeFraction = GetFluxBrakeCurrentFraction(currentFraction);	// always called, so the supply-voltage baseline stays maintained
+	if (fluxBrakeFraction > 0.0)
+	{
+		SetMotorPhaseAndFluxBrake(commandedStepPhase, currentFraction, (uint16_t)encoder->GetCurrentPhasePosition(), fluxBrakeFraction);
+	}
+	else
+	{
+		SetMotorPhase(commandedStepPhase, currentFraction);
+	}
+#else
 	SetMotorPhase(commandedStepPhase, currentFraction);
+#endif
 	return currentFraction;
 }
+
+#if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+
+# if TMC_ON_CORE1
+// Mirror the runtime feature settings into the kernel's shared state (plain volatiles: each field is
+// meaningful on its own). Called at init and after every feature-register write.
+void ClosedLoop::PublishFeatureConfig() noexcept
+{
+#  if SUPPORT_PHASE_ADVANCE
+	motorState.phaseAdvanceEnabled = phaseAdvanceEnabled;
+	motorState.phaseAdvanceStartStepsPerSec = phaseAdvanceStartStepsPerSec;
+	motorState.phaseAdvanceCountsPerStepPerSec = phaseAdvanceCountsPerStepPerSec;
+	motorState.phaseAdvanceMaxCounts = phaseAdvanceMaxCountsLimit;
+#  endif
+#  if SUPPORT_FLUX_BRAKING
+	motorState.fluxBrakeEnabled = fluxBrakeEnabled;
+	motorState.fluxBrakeOnsetDeltaMv = fluxBrakeOnsetDeltaMv;
+	motorState.fluxBrakeRecipRangeMv = fluxBrakeRecipRangeMv;
+	motorState.fluxBrakeMaxFraction = fluxBrakeMaxFraction;
+#  endif
+}
+# endif
+
+// Handle a read or write of a board-local closed-loop feature register, reached via M569.2 with a
+// register number of 0x80 or above (outside the TMC register space, so no main-board firmware
+// support is needed). Values are plain unsigned integers. Register map:
+//   128 (0x80) flux braking enable (0/1)
+//   129 (0x81) flux braking onset delta, mV above the supply-voltage baseline
+//   130 (0x82) flux braking full-injection delta, mV above the baseline
+//   131 (0x83) flux braking maximum injection, percent of the configured motor current (0-100)
+//   132 (0x84) phase advance enable (0/1)
+//   133 (0x85) phase advance onset speed, full steps/sec
+//   134 (0x86) phase advance slope, thousandths of a phase count per full step/sec
+//   135 (0x87) phase advance maximum, phase counts (1/4096 electrical rev, limit 1024 = 90deg)
+// Settings changed here are not persisted; set them from config.g if they should survive a reboot.
+GCodeResult ClosedLoop::ProcessFeatureRegister(bool isSet, uint8_t regNum, uint32_t regVal, const StringRef& reply) noexcept
+{
+	GCodeResult rslt = GCodeResult::ok;
+	switch (regNum)
+	{
+# if SUPPORT_FLUX_BRAKING
+	case 0x80:
+		if (isSet)	{ fluxBrakeEnabled = (regVal != 0); }
+		else		{ reply.printf("flux braking %s", (fluxBrakeEnabled) ? "enabled" : "disabled"); }
+		break;
+
+	case 0x81:
+	case 0x82:
+		if (isSet)
+		{
+			const uint16_t onset = (regNum == 0x81) ? (uint16_t)min<uint32_t>(regVal, 60000) : fluxBrakeOnsetDeltaMv;
+			const uint16_t full = (regNum == 0x82) ? (uint16_t)min<uint32_t>(regVal, 60000) : fluxBrakeFullDeltaMv;
+			if (full <= onset)
+			{
+				reply.copy("full-injection delta must exceed the onset delta");
+				return GCodeResult::error;
+			}
+			fluxBrakeOnsetDeltaMv = onset;
+			fluxBrakeFullDeltaMv = full;
+			fluxBrakeRecipRangeMv = 1.0f/(float)(full - onset);
+		}
+		else
+		{
+			reply.printf("flux braking onset %umV, full injection %umV", fluxBrakeOnsetDeltaMv, fluxBrakeFullDeltaMv);
+		}
+		break;
+
+	case 0x83:
+		if (isSet)
+		{
+			if (regVal > 100)
+			{
+				reply.copy("percentage must be 0-100");
+				return GCodeResult::error;
+			}
+			fluxBrakeMaxFraction = (float)regVal * 0.01f;
+		}
+		else
+		{
+			reply.printf("flux braking maximum %u%%", (unsigned int)lrintf(fluxBrakeMaxFraction * 100.0f));
+		}
+		break;
+# endif
+
+# if SUPPORT_PHASE_ADVANCE
+	case 0x84:
+		if (isSet)	{ phaseAdvanceEnabled = (regVal != 0); }
+		else		{ reply.printf("phase advance %s", (phaseAdvanceEnabled) ? "enabled" : "disabled"); }
+		break;
+
+	case 0x85:
+		if (isSet)	{ phaseAdvanceStartStepsPerSec = (float)min<uint32_t>(regVal, 100000); }
+		else		{ reply.printf("phase advance onset %u full steps/sec", (unsigned int)lrintf(phaseAdvanceStartStepsPerSec)); }
+		break;
+
+	case 0x86:
+		if (isSet)	{ phaseAdvanceCountsPerStepPerSec = (float)min<uint32_t>(regVal, 100000) * 0.001f; }
+		else		{ reply.printf("phase advance slope %u milli-counts per full step/sec", (unsigned int)lrintf(phaseAdvanceCountsPerStepPerSec * 1000.0f)); }
+		break;
+
+	case 0x87:
+		if (isSet)
+		{
+			if (regVal > 1024)
+			{
+				reply.copy("maximum advance is 1024 counts (90deg electrical)");
+				return GCodeResult::error;
+			}
+			phaseAdvanceMaxCountsLimit = (uint16_t)regVal;
+		}
+		else
+		{
+			reply.printf("phase advance maximum %u counts", phaseAdvanceMaxCountsLimit);
+		}
+		break;
+# endif
+
+	default:
+		reply.printf("unknown feature register %u", regNum);
+		return GCodeResult::error;
+	}
+# if TMC_ON_CORE1
+	if (isSet)
+	{
+		PublishFeatureConfig();
+	}
+# endif
+	return rslt;
+}
+
+#endif	// SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
 
 const char *_ecv_array ClosedLoop::GetModeText() const noexcept
 {
@@ -1380,6 +1590,36 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 {
 	reply.printf("Closed loop driver %u mode: %s", driver, GetModeText());
 	reply.catf(", pre-error threshold: %.2f, error threshold: %.2f", (double) errorThresholds[0], (double) errorThresholds[1]);
+#if SUPPORT_FLUX_BRAKING
+	{
+# if TMC_ON_CORE1
+		const uint32_t fbCycles = motorState.fluxBrakeCycles;
+		const uint16_t fbOvershoot = motorState.fluxBrakeMaxOvershootMv;
+		motorState.fluxBrakeCycles = 0;
+		motorState.fluxBrakeMaxOvershootMv = 0;
+# else
+		const uint32_t fbCycles = fluxBrakeCycles;
+		const uint16_t fbOvershoot = fluxBrakeMaxOvershootMv;
+		fluxBrakeCycles = 0;
+		fluxBrakeMaxOvershootMv = 0;
+# endif
+		reply.catf(", flux brake %s, cycles %" PRIu32 ", max VS overshoot %.1fV",
+					(fluxBrakeEnabled) ? "on" : "off", fbCycles, (double)((float)fbOvershoot * 0.001));
+	}
+#endif
+#if SUPPORT_PHASE_ADVANCE
+	{
+# if TMC_ON_CORE1
+		const uint16_t advCounts = motorState.maxPhaseAdvanceCounts;
+		motorState.maxPhaseAdvanceCounts = 0;
+# else
+		const uint16_t advCounts = maxPhaseAdvanceCounts;
+		maxPhaseAdvanceCounts = 0;
+# endif
+		reply.catf(", phase advance %s, max used %.1fdeg",
+					(phaseAdvanceEnabled) ? "on" : "off", (double)((float)advCounts * (360.0/4096.0)));
+	}
+#endif
 	reply.catf(", encoder type %s", GetEncoderType().ToString());
 	if (encoder != nullptr)
 	{
@@ -1438,10 +1678,18 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 /*static*/ void ClosedLoop::BenchTelemetryReport(const StringRef& reply) noexcept
 {
 #if TMC_ON_CORE1
-	// From the kernel's motor control block. Note poserr_max is since the last statistics period
+	// From the kernel's shared state. Note poserr_max is since the last statistics period
 	// (the mainboard's regular status polls reset it), not since the 'Z' command.
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
 				millis() - benchTelResetMs, motorState.cycleCount, (double)motorState.statMaxAbsError);
+# if SUPPORT_PHASE_ADVANCE
+	reply.catf(" advmax=%.1fdeg", (double)((float)motorState.maxPhaseAdvanceCounts * (360.0/4096.0)));
+# endif
+# if SUPPORT_FLUX_BRAKING
+	reply.catf(" fluxcyc=%" PRIu32 " fluxover=%.2fV vsmax=%.2fV",
+				motorState.fluxBrakeCycles, (double)((float)motorState.fluxBrakeMaxOvershootMv * 0.001),
+				(double)((float)motorState.vsMaxMv * 0.001));
+# endif
 #else
 	reply.printf("FTEL ms=%" PRIu32 " loops=%" PRIu32 " poserr_max=%.3f",
 				millis() - benchTelResetMs, benchTelLoopCount, (double)benchTelMaxAbsPosErr);
@@ -1512,6 +1760,14 @@ void ClosedLoop::InstanceDiagnostics(size_t driver, const StringRef& reply) noex
 	benchTelMaxAbsPosErr = 0.0;
 	benchTelResetMs = millis();
 #if TMC_ON_CORE1
+# if SUPPORT_PHASE_ADVANCE
+	motorState.maxPhaseAdvanceCounts = 0;
+# endif
+# if SUPPORT_FLUX_BRAKING
+	motorState.fluxBrakeCycles = 0;
+	motorState.fluxBrakeMaxOvershootMv = 0;
+	motorState.vsMaxMv = 0;
+# endif
 	motorState.stepGapMinTicks = 0;
 	motorState.stepGapMaxTicks = 0;
 	motorState.stepLastTicks = 0;

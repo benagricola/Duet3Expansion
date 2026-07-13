@@ -163,6 +163,9 @@ public:
 	GCodeResult ProcessM569Point4(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
 	GCodeResult ProcessM569Point5(const CanMessageStartClosedLoopDataCollection&, const StringRef& reply) noexcept;
 	GCodeResult ProcessM569Point6(const CanMessageGeneric& msg, const StringRef& reply) noexcept;
+# if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+	GCodeResult ProcessClosedLoopFeatureRegister(uint8_t drive, bool isSet, uint8_t regNum, uint32_t regVal, const StringRef& reply) noexcept;	// M569.2 register numbers 0x80+
+# endif
 
 	bool IsClosedLoopEnabled(size_t driver) const noexcept { return dms[driver].closedLoopControl.IsClosedLoopEnabled(); }
 	bool EnableIfIdle(size_t driver) noexcept;										// if the driver is idle, enable it; return true if driver enabled on return

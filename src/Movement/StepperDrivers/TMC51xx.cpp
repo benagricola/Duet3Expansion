@@ -455,6 +455,7 @@ public:
 #if TMC_TYPE == 2240
 	float GetDriverTemperature() const noexcept;			// get driver temperature from ADC_TEMP register
 	float GetSupplyVoltage() const noexcept;				// get supply voltage from the ADC_VSUPPLY register
+	uint16_t GetVsupplyAdcReading() const noexcept;			// raw ADC_VSUPPLY counts (9.732mV per count), for the flux-braking monitor
 	float GetPeakSupplyVoltage(bool clear) noexcept;		// get the peak supply voltage seen since the last call, optionally clearing it
 #endif
 
@@ -988,6 +989,11 @@ float TmcDriverState::GetSupplyVoltage() const noexcept
 {
 	// TMC2240 datasheet: VS = ADC_VSUPPLY * 9.732mV
 	return (float)(readRegisters[ReadAdcVsupply] & ADC_VSUPPLY_MASK) * ADC_VSUPPLY_TO_VOLTS;
+}
+
+uint16_t TmcDriverState::GetVsupplyAdcReading() const noexcept
+{
+	return (uint16_t)(readRegisters[ReadAdcVsupply] & ADC_VSUPPLY_MASK);
 }
 
 float TmcDriverState::GetPeakSupplyVoltage(bool clear) noexcept
@@ -2027,6 +2033,15 @@ bool SmartDrivers::SetMotorPhases(size_t driver, uint32_t regVal) noexcept
 {
 	return driverStates[driver].SetXdirect(regVal);
 }
+
+# if SUPPORT_FLUX_BRAKING && TMC_TYPE == 2240
+// Return the raw TMC2240 supply-voltage ADC reading (9.732mV per count), for the closed-loop flux braking monitor
+TIME_CRITICAL
+uint16_t SmartDrivers::GetSupplyVoltageAdcReading(size_t driver) noexcept
+{
+	return (driver < numTmcDrivers) ? driverStates[driver].GetVsupplyAdcReading() : 0;
+}
+# endif
 
 # if MNB_USB_DIAG
 // Bench diagnostic: report the XDIRECT staging state so the coil-current path can be traced end to end

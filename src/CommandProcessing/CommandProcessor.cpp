@@ -273,6 +273,18 @@ static GCodeResult ProcessM569Point2(const CanMessageGeneric& msg, const StringR
 		return GCodeResult::error;
 	}
 
+#if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+	if (regNum >= 0x80)
+	{
+		// Register numbers above the TMC register space are board-local closed-loop feature registers,
+		// so that the features can be switched and tuned at runtime via M569.2 without any main-board
+		// firmware support
+		uint32_t featureVal = 0;
+		const bool isSet = parser.GetUintParam('V', featureVal);
+		return moveInstance->ProcessClosedLoopFeatureRegister(drive, isSet, regNum, featureVal, reply);
+	}
+#endif
+
 	uint32_t regVal;
 	if (parser.GetUintParam('V', regVal))
 	{

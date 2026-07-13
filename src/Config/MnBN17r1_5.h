@@ -43,6 +43,30 @@
 #define SUPPORT_DELTA_MOVEMENT	0
 #define SUPPORT_CLOSED_LOOP		1
 
+#if SUPPORT_CLOSED_LOOP
+// Flux braking: when the motor supply voltage rises above its recent baseline (motor regeneration
+// during deceleration), the closed-loop control loop injects d-axis (zero-torque) current so that the
+// excess energy is dissipated in the motor windings, limiting the rise of the bus voltage. The
+// thresholds are deltas above a self-tracking baseline, so they work unchanged on any supply voltage
+// and need no configuration from RRF. See ClosedLoop::GetFluxBrakeCurrentFraction.
+# define SUPPORT_FLUX_BRAKING	1
+constexpr bool FluxBrakeEnabledByDefault = false;	// off at boot; enable at runtime once wanted (M569.2 feature register 128)
+constexpr float FluxBrakeOnsetDeltaVolts = 2.5;		// start injecting when the supply voltage exceeds the baseline by this
+constexpr float FluxBrakeFullDeltaVolts = 6.0;		// inject the maximum d-axis current at this much overshoot
+constexpr float FluxBrakeMaxCurrentFraction = 0.5;	// maximum injected d-axis current, as a fraction of the configured motor current
+
+// Phase advance (field weakening): at speed, winding inductance and shrinking voltage headroom make
+// the actual coil currents lag behind the commanded rotating vector, which costs torque. The control
+// loop compensates by advancing the commanded vector in the direction of rotation, proportionally to
+// speed above an onset threshold. The slope and clamp are motor- and supply-dependent and are
+// starting values to be tuned on hardware. See the phase advance block in ClosedLoop::ControlMotorCurrents.
+# define SUPPORT_PHASE_ADVANCE	1
+constexpr bool PhaseAdvanceEnabledByDefault = false;		// off at boot; enable at runtime once closed-loop behaviour is trusted (M569.2 feature register 132)
+constexpr float PhaseAdvanceStartStepsPerSec = 400.0;		// full steps/sec at which advance begins (2 rev/s on a 1.8deg motor)
+constexpr float PhaseAdvanceCountsPerStepPerSec = 0.2;		// phase counts (1/4096 electrical rev) of advance per full step/sec above the onset
+constexpr uint16_t PhaseAdvanceMaxCounts = 512;				// maximum advance; 512 counts = 45 degrees electrical
+#endif
+
 #define SUPPORT_TMC2660			0
 #define SUPPORT_TMC2209			0
 #define SUPPORT_TMC2240			1			// TMC2240 register support

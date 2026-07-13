@@ -26,6 +26,7 @@
 #if SUPPORT_CLOSED_LOOP
 
 #include <Movement/StepTimer.h>
+#include "Trigonometry.h"
 
 namespace MotorControlMath
 {
@@ -82,6 +83,97 @@ namespace MotorControlMath
 		commandedStepPhase = (stepPhase + phaseOffset) % 4096u;
 		currentFraction = holdCurrentFraction + (1.0 - holdCurrentFraction) * min<float>(controlSignal * (1.0/256.0), 1.0);
 	}
+
+	// Coil currents for a torque-producing vector (phase/magnitude, about 90deg electrical to the
+	// rotor) plus an optional zero-torque flux-braking vector along the measured rotor axis
+	// (rotorPhase/brakeMagnitude). Both magnitudes are 0.0..1.0 and their squares must sum to no
+	// more than 1; the components are clamped to the +/-248 swing FastSinCos is scaled for anyway.
+	static inline void ComputeCoilCurrents(uint16_t phase, float magnitude, uint16_t rotorPhase, float brakeMagnitude,
+										int16_t& coilA, int16_t& coilB) noexcept
+	{
+		float sine, cosine;
+		Trigonometry::FastSinCos(phase, sine, cosine);
+		if (brakeMagnitude > 0.0)
+		{
+			float brakeSine, brakeCosine;
+			Trigonometry::FastSinCos(rotorPhase, brakeSine, brakeCosine);
+			coilA = (int16_t)constrain<int32_t>(lrintf(cosine * magnitude + brakeCosine * brakeMagnitude), -248, 248);
+			coilB = (int16_t)constrain<int32_t>(lrintf(sine * magnitude + brakeSine * brakeMagnitude), -248, 248);
+		}
+		else
+		{
+			coilA = (int16_t)lrintf(cosine * magnitude);
+			coilB = (int16_t)lrintf(sine * magnitude);
+		}
+	}
+
+#if SUPPORT_PHASE_ADVANCE
+	// Speed-proportional phase advance (field weakening): at speed, winding inductance and the
+	// shrinking voltage headroom make the actual coil currents lag behind the rotating command,
+	// which costs torque; compensate by advancing the command in the direction of rotation,
+	// proportionally to speed above the onset threshold. This is distinct from the phase
+	// feedforward in ComputeClosedLoop, which only compensates the one-cycle control latency.
+	// Returns the adjusted phase; advanceCountsApplied reports the advance used (diagnostics).
+	static inline uint16_t ApplyPhaseAdvance(float speedStepsPerSec, float onsetStepsPerSec, float countsPerStepPerSec,
+										uint16_t maxCounts, uint16_t commandedStepPhase, uint16_t& advanceCountsApplied) noexcept
+	{
+		const float advance = (fabsf(speedStepsPerSec) - onsetStepsPerSec) * countsPerStepPerSec;
+		if (advance > 0.0)
+		{
+			const uint16_t advanceCounts = (uint16_t)min<float>(advance, (float)maxCounts);
+			advanceCountsApplied = advanceCounts;
+			const int32_t signedAdvance = (speedStepsPerSec < 0.0) ? -(int32_t)advanceCounts : (int32_t)advanceCounts;
+			return (uint16_t)(((int32_t)commandedStepPhase + signedAdvance) & 0x0FFF);
+		}
+		advanceCountsApplied = 0;
+		return commandedStepPhase;
+	}
+#endif
+
+#if SUPPORT_FLUX_BRAKING
+	constexpr uint16_t FluxBrakeSnapMv = 8000;					// a single-sample jump bigger than this is the supply appearing, not regeneration
+	constexpr uint16_t FluxBrakeBaselineDriftMv = 10;			// upward drift step, applied every 64 control cycles (about 2V/s at the 12.5kHz loop rate)
+
+	// Maintain the supply-voltage baseline and return the d-axis current fraction to inject. Call at
+	// the control loop frequency with a plausible reading (the caller applies its ADC's validity
+	// window). The baseline follows a falling supply immediately, drifts upwards only slowly (so that
+	// regeneration, which raises the bus over milliseconds, registers as overshoot) and snaps up on a
+	// large single-sample jump (the supply being switched on, which no motor could produce). The
+	// drift step never overtakes the current reading: a step past it would make the unsigned
+	// subtraction wrap and read as a huge phantom overshoot (seen on the bench as spurious braking
+	// about once a second with the maximum overshoot recorded as 0xFFFF). The torque demand keeps
+	// priority: braking only gets the headroom left in the current budget. overshootOut reports the
+	// overshoot above the baseline (diagnostics), whether or not braking is enabled.
+	static inline float ComputeFluxBrakeFraction(uint16_t vsMv, uint16_t& baselineMv, uint32_t& baselineDivider,
+										bool enabled, uint16_t onsetDeltaMv, float recipRangeMv, float maxFraction,
+										float torqueCurrentFraction, uint16_t& overshootOut) noexcept
+	{
+		overshootOut = 0;
+		if (vsMv <= baselineMv)
+		{
+			baselineMv = vsMv;										// follow a falling supply immediately
+			return 0.0;
+		}
+		if (vsMv - baselineMv >= FluxBrakeSnapMv)
+		{
+			baselineMv = vsMv;										// supply switched on, not regeneration
+			return 0.0;
+		}
+		if (((++baselineDivider) & 0x3F) == 0 && baselineMv < vsMv)
+		{
+			baselineMv = min<uint16_t>(baselineMv + FluxBrakeBaselineDriftMv, vsMv);
+		}
+		const uint16_t overshoot = vsMv - baselineMv;
+		overshootOut = overshoot;
+		if (!enabled || overshoot <= onsetDeltaMv)					// the baseline is maintained even while disabled, so enabling at runtime behaves cleanly
+		{
+			return 0.0;
+		}
+		const float requested = min<float>((float)(overshoot - onsetDeltaMv) * recipRangeMv, 1.0) * maxFraction;
+		const float headroom = fastSqrtf(max<float>(1.0 - fsquare(torqueCurrentFraction), 0.0));
+		return min<float>(requested, headroom);
+	}
+#endif
 
 	// Stall / pre-stall detection with hysteresis: the stall flag resets when the position error
 	// falls to below half the tolerance, to avoid generating too many stall events. Returns true

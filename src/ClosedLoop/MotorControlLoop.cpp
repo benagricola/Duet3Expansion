@@ -35,6 +35,9 @@
 namespace SmartDrivers
 {
 	bool SetMotorPhases(size_t driver, uint32_t regVal) noexcept;
+#if SUPPORT_FLUX_BRAKING
+	uint16_t GetSupplyVoltageAdcReading(size_t driver) noexcept;	// raw TMC2240 ADC_VSUPPLY reading, 9.732mV per count
+#endif
 }
 
 MotorControlState motorState;
@@ -65,6 +68,12 @@ namespace MotorControl
 	static float lastPIDControlSignal = 0.0, lastPIDPTerm = 0.0, lastPIDDTerm = 0.0, lastPIDVTerm = 0.0, lastPIDATerm = 0.0;
 	static int16_t lastCoilA = 0, lastCoilB = 0;
 
+#if SUPPORT_FLUX_BRAKING
+	// Flux-braking supply-voltage baseline (see MotorControlMath::ComputeFluxBrakeFraction)
+	static uint16_t vsBaselineMv = 0xFFFF;						// inits high so the first reading snaps it down
+	static uint32_t vsBaselineDivider = 0;
+#endif
+
 	// Sample-streaming state (latched from the shared state when sampleArmSeq changes)
 	static uint32_t lastSampleArmSeq = 0;
 	static uint16_t sampleFilter = 0;
@@ -83,17 +92,21 @@ namespace MotorControl
 	static uint32_t whenLastSweepStep = 0;
 	static uint16_t sweepPhase = 0;								// the manoeuvres' working phase (was ClosedLoop::desiredStepPhase)
 
-	// Set the coil currents for the given phase and magnitude (0.0..1.0), and publish what we commanded
-	TIME_CRITICAL static void SetMotorPhase(uint16_t phase, float magnitude) noexcept
+	// Set the coil currents for the given phase and magnitude (0.0..1.0), optionally summed with a
+	// zero-torque flux-braking vector along the rotor axis, and publish what we commanded
+	TIME_CRITICAL static void SetMotorPhaseAndFluxBrake(uint16_t phase, float magnitude, uint16_t rotorPhase, float brakeMagnitude) noexcept
 	{
-		float sine, cosine;
-		Trigonometry::FastSinCos(phase, sine, cosine);
-		const int16_t coilA = (int16_t)lrintf(cosine * magnitude);
-		const int16_t coilB = (int16_t)lrintf(sine * magnitude);
+		int16_t coilA, coilB;
+		MotorControlMath::ComputeCoilCurrents(phase, magnitude, rotorPhase, brakeMagnitude, coilA, coilB);
 		(void)SmartDrivers::SetMotorPhases(driverNumber, (((uint32_t)(uint16_t)coilB << 16) | (uint32_t)(uint16_t)coilA) & 0x01FF01FF);
 		motorState.commandedStepPhase = phase;
 		lastCoilA = coilA;
 		lastCoilB = coilB;
+	}
+
+	TIME_CRITICAL static void SetMotorPhase(uint16_t phase, float magnitude) noexcept
+	{
+		SetMotorPhaseAndFluxBrake(phase, magnitude, 0, 0.0);
 	}
 
 	// Diagnostic sample streaming, ported from ClosedLoop::CollectSample and the scheduling logic
@@ -429,7 +442,48 @@ namespace MotorControl
 									lastPIDPTerm, lastPIDDTerm, lastPIDVTerm, lastPIDATerm, lastPIDControlSignal,
 									commandedStepPhase, currentFraction);
 			}
+#if SUPPORT_PHASE_ADVANCE
+			if (mode == MotorMode::closedLoop && motorState.phaseAdvanceEnabled)
+			{
+				const float stepsPerSec = speedFilter.GetDerivative() * (float)StepTimer::StepClockRate;	// signed full steps/sec
+				uint16_t advanceCounts;
+				commandedStepPhase = MotorControlMath::ApplyPhaseAdvance(stepsPerSec, motorState.phaseAdvanceStartStepsPerSec,
+										motorState.phaseAdvanceCountsPerStepPerSec, (uint16_t)motorState.phaseAdvanceMaxCounts,
+										commandedStepPhase, advanceCounts);
+				if (advanceCounts > motorState.maxPhaseAdvanceCounts) { motorState.maxPhaseAdvanceCounts = advanceCounts; }
+			}
+#endif
+
+#if SUPPORT_FLUX_BRAKING
+			// Always evaluated (not just when enabled) so the supply-voltage baseline stays maintained
+			float fluxBrakeFraction = 0.0;
+			{
+				const uint16_t vsMv = (uint16_t)(((uint32_t)SmartDrivers::GetSupplyVoltageAdcReading(driverNumber) * 9732u)/1000u);
+				if (vsMv >= 3000 && vsMv <= 40000)		// outside this window = unrefreshed or corrupted register value; acting on it would corrupt the baseline
+				{
+					if (vsMv > motorState.vsMaxMv) { motorState.vsMaxMv = vsMv; }
+					uint16_t overshoot;
+					fluxBrakeFraction = MotorControlMath::ComputeFluxBrakeFraction(vsMv, vsBaselineMv, vsBaselineDivider,
+											motorState.fluxBrakeEnabled, motorState.fluxBrakeOnsetDeltaMv, motorState.fluxBrakeRecipRangeMv,
+											motorState.fluxBrakeMaxFraction, currentFraction, overshoot);
+					if (motorState.fluxBrakeEnabled && overshoot > motorState.fluxBrakeOnsetDeltaMv)
+					{
+						if (overshoot > motorState.fluxBrakeMaxOvershootMv) { motorState.fluxBrakeMaxOvershootMv = overshoot; }
+						motorState.fluxBrakeCycles = motorState.fluxBrakeCycles + 1;
+					}
+				}
+			}
+			if (fluxBrakeFraction > 0.0)
+			{
+				SetMotorPhaseAndFluxBrake(commandedStepPhase, currentFraction, (uint16_t)measuredStepPhase, fluxBrakeFraction);
+			}
+			else
+			{
+				SetMotorPhase(commandedStepPhase, currentFraction);
+			}
+#else
 			SetMotorPhase(commandedStepPhase, currentFraction);
+#endif
 
 			// Stall / pre-stall detection - shared hysteresis; the fault event is deferred to core 0
 			bool stall = motorState.stall, preStall = motorState.preStall;

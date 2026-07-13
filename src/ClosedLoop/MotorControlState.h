@@ -117,12 +117,22 @@ struct MotorControlState
 	// measured phase at mode entry. Written only while core 1 is parked (the mode transition).
 	volatile uint16_t phaseOffset = 0;
 
-	// Feature config (phase advance / flux braking), read every cycle. (Not yet used by the kernel:
-	// the ported control law has its own fixed phase feedforward, matching the proven behaviour.)
+	// Feature config (phase advance / flux braking), written by core 0 (board defaults, then the
+	// M569.2 feature registers via ClosedLoop::ProcessFeatureRegister) and read every cycle by the
+	// kernel. Plain volatiles: each field is meaningful on its own, so a torn group is harmless.
 	volatile bool phaseAdvanceEnabled = false;
 	volatile float phaseAdvanceStartStepsPerSec = 0, phaseAdvanceCountsPerStepPerSec = 0;
 	volatile uint32_t phaseAdvanceMaxCounts = 0;
 	volatile bool fluxBrakeEnabled = false;
+	volatile uint16_t fluxBrakeOnsetDeltaMv = 0;
+	volatile float fluxBrakeRecipRangeMv = 0;					// 1/(fullDeltaMv - onsetDeltaMv)
+	volatile float fluxBrakeMaxFraction = 0;
+
+	// Feature diagnostics, written by the kernel, read and cleared by core 0 (M122 / bench telemetry)
+	volatile uint16_t maxPhaseAdvanceCounts = 0;				// largest phase advance applied, 1/4096ths of an electrical rev
+	volatile uint32_t fluxBrakeCycles = 0;						// control cycles that injected braking current
+	volatile uint16_t fluxBrakeMaxOvershootMv = 0;				// largest supply overshoot seen while braking was possible
+	volatile uint16_t vsMaxMv = 0;								// highest plausible supply-voltage sample seen (bench telemetry)
 
 	// Direct command (directCommand mode). Written as a group under commandSeq.
 	volatile uint32_t commandSeq = 0;

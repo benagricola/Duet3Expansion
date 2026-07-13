@@ -2290,6 +2290,21 @@ GCodeResult Move::ProcessM569Point1(const CanMessageGeneric &msg, const StringRe
 	return dms[drive].closedLoopControl.ProcessM569Point1(parser, reply);
 }
 
+#if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+
+// Handle M569.2 accesses to register numbers 0x80 and above, which are board-local closed-loop feature registers
+GCodeResult Move::ProcessClosedLoopFeatureRegister(uint8_t drive, bool isSet, uint8_t regNum, uint32_t regVal, const StringRef &reply) noexcept
+{
+	if (drive >= NumDrivers)
+	{
+		reply.copy("no such driver");
+		return GCodeResult::error;
+	}
+	return dms[drive].closedLoopControl.ProcessFeatureRegister(isSet, regNum, regVal, reply);
+}
+
+#endif
+
 // M569.4 Set torque mode
 GCodeResult Move::ProcessM569Point4(const CanMessageGeneric& msg, const StringRef& reply) noexcept
 {

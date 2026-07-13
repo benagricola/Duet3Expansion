@@ -66,6 +66,12 @@ public:
 	GCodeResult ProcessM569Point4(CanMessageGenericParser& parser, const StringRef& reply) noexcept;
 	GCodeResult ProcessM569Point5(const CanMessageStartClosedLoopDataCollection&, const StringRef& reply) noexcept;
 	GCodeResult ProcessM569Point6(CanMessageGenericParser& parser, const StringRef& reply) noexcept;
+#if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+	GCodeResult ProcessFeatureRegister(bool isSet, uint8_t regNum, uint32_t regVal, const StringRef& reply) noexcept;	// M569.2 register numbers 0x80+
+# if TMC_ON_CORE1
+	void PublishFeatureConfig() noexcept;					// mirror the feature settings into the kernel's shared state
+# endif
+#endif
 	void UpdateStandstillCurrent() noexcept;
 
 	const char *_ecv_array GetModeText() const noexcept;
@@ -126,6 +132,10 @@ private:
 
 	// Methods used only by closed loop and by the tuning module
 	void SetMotorPhase(uint16_t phase, float magnitude) noexcept;
+#if SUPPORT_FLUX_BRAKING
+	void SetMotorPhaseAndFluxBrake(uint16_t phase, float magnitude, uint16_t rotorPhase, float brakeMagnitude) noexcept;
+	float GetFluxBrakeCurrentFraction(float torqueCurrentFraction) noexcept;	// maintain the supply-voltage baseline and return the d-axis current to inject
+#endif
 	void FinishedBasicTuning() noexcept;
 																// call this when we have stopped basic tuning movement and are ready to switch to closed loop control
 	void ReadyToCalibrate(bool store) noexcept;					// call this when encoder calibration has finished collecting data
@@ -187,6 +197,32 @@ private:
 	uint16_t phaseOffset = 0;							// The amount by which the phase should be offset when in semi-open-loop mode
 	int16_t coilA;										// The current to run through coil A
 	int16_t coilB;										// The current to run through coil A
+
+#if SUPPORT_FLUX_BRAKING || SUPPORT_PHASE_ADVANCE
+	static constexpr uint16_t MvOfVolts(float v) noexcept { return (uint16_t)(v * 1000.0f); }
+#endif
+#if SUPPORT_FLUX_BRAKING
+	// Runtime settings, initialised from the board defaults and adjustable via the M569.2 feature registers
+	bool fluxBrakeEnabled = FluxBrakeEnabledByDefault;
+	uint16_t fluxBrakeOnsetDeltaMv = MvOfVolts(FluxBrakeOnsetDeltaVolts);
+	uint16_t fluxBrakeFullDeltaMv = MvOfVolts(FluxBrakeFullDeltaVolts);
+	float fluxBrakeMaxFraction = FluxBrakeMaxCurrentFraction;
+	float fluxBrakeRecipRangeMv = 1.0f/(float)(MvOfVolts(FluxBrakeFullDeltaVolts) - MvOfVolts(FluxBrakeOnsetDeltaVolts));
+
+	uint16_t vsBaselineMv = 0xFFFF;						// slow-tracking baseline of the supply voltage in millivolts; inits high so the first reading snaps it down
+	uint32_t vsBaselineDivider = 0;						// divides the loop rate down for the baseline's slow upward drift
+	uint32_t fluxBrakeCycles = 0;						// diagnostic: number of control cycles that injected braking current
+	uint16_t fluxBrakeMaxOvershootMv = 0;				// diagnostic: largest supply-voltage overshoot seen, in millivolts
+#endif
+#if SUPPORT_PHASE_ADVANCE
+	// Runtime settings, initialised from the board defaults and adjustable via the M569.2 feature registers
+	bool phaseAdvanceEnabled = PhaseAdvanceEnabledByDefault;
+	float phaseAdvanceStartStepsPerSec = PhaseAdvanceStartStepsPerSec;
+	float phaseAdvanceCountsPerStepPerSec = PhaseAdvanceCountsPerStepPerSec;
+	uint16_t phaseAdvanceMaxCountsLimit = PhaseAdvanceMaxCounts;
+
+	uint16_t maxPhaseAdvanceCounts = 0;					// diagnostic: largest phase advance applied, in 1/4096ths of an electrical revolution
+#endif
 
 	bool	hasMovementCommand = false;					// true if a regular movement command is being executed
 	bool	inTorqueMode = false;

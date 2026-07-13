@@ -132,6 +132,14 @@ constexpr size_t NumDrivers = 0;
 # define USE_SERIAL_DEBUG				0
 #endif
 
+#if !defined(SUPPORT_FLUX_BRAKING)
+# define SUPPORT_FLUX_BRAKING			0
+#endif
+
+#if !defined(SUPPORT_PHASE_ADVANCE)
+# define SUPPORT_PHASE_ADVANCE			0
+#endif
+
 #ifndef SUPPORT_LED_STRIPS
 # define SUPPORT_LED_STRIPS				1
 #endif
