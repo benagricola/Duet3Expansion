@@ -475,7 +475,7 @@ namespace MotorControl
 					uint16_t overshoot;
 					fluxBrakeFraction = MotorControlMath::ComputeFluxBrakeFraction(vsMv, vsBaselineMv, vsBaselineDivider,
 											motorState.fluxBrakeEnabled, motorState.fluxBrakeOnsetDeltaMv, motorState.fluxBrakeRecipRangeMv,
-											motorState.fluxBrakeMaxFraction, currentFraction, overshoot);
+											motorState.fluxBrakeMaxFraction, motorState.fluxBrakeSnapMv, currentFraction, overshoot);
 					if (motorState.fluxBrakeEnabled && overshoot > motorState.fluxBrakeOnsetDeltaMv)
 					{
 						if (overshoot > motorState.fluxBrakeMaxOvershootMv) { motorState.fluxBrakeMaxOvershootMv = overshoot; }

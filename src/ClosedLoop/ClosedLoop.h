@@ -22,6 +22,7 @@
 # include "SampleBuffer.h"
 # include "Encoders/Encoder.h"
 # include "MotorControlState.h"
+# include "MotorControlMath.h"
 # include "TuningMoves.h"
 
 constexpr float MaxSafeBacklash = 0.22;					// the maximum backlash in full steps that we can use - error if there is more
@@ -208,6 +209,7 @@ private:
 	uint16_t fluxBrakeFullDeltaMv = MvOfVolts(FluxBrakeFullDeltaVolts);
 	float fluxBrakeMaxFraction = FluxBrakeMaxCurrentFraction;
 	float fluxBrakeRecipRangeMv = 1.0f/(float)(MvOfVolts(FluxBrakeFullDeltaVolts) - MvOfVolts(FluxBrakeOnsetDeltaVolts));
+	uint16_t fluxBrakeSnapMv = MotorControlMath::FluxBrakeSnapDefaultMv;	// single-sample jump treated as a supply step, not regeneration (M569.2 register 136)
 
 	uint16_t vsBaselineMv = 0xFFFF;						// slow-tracking baseline of the supply voltage in millivolts; inits high so the first reading snaps it down
 	uint32_t vsBaselineDivider = 0;						// divides the loop rate down for the baseline's slow upward drift

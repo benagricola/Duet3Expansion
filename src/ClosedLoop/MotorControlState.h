@@ -127,6 +127,7 @@ struct MotorControlState
 	volatile uint16_t fluxBrakeOnsetDeltaMv = 0;
 	volatile float fluxBrakeRecipRangeMv = 0;					// 1/(fullDeltaMv - onsetDeltaMv)
 	volatile float fluxBrakeMaxFraction = 0;
+	volatile uint16_t fluxBrakeSnapMv = 8000;					// single-sample jump treated as a supply step rather than regeneration
 
 	// Feature diagnostics, written by the kernel, read and cleared by core 0 (M122 / bench telemetry)
 	volatile uint16_t maxPhaseAdvanceCounts = 0;				// largest phase advance applied, 1/4096ths of an electrical rev

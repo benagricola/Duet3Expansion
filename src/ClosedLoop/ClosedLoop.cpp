@@ -237,7 +237,7 @@ float ClosedLoop::GetFluxBrakeCurrentFraction(float torqueCurrentFraction) noexc
 	uint16_t overshoot;
 	const float fraction = MotorControlMath::ComputeFluxBrakeFraction(vsMv, vsBaselineMv, vsBaselineDivider,
 										fluxBrakeEnabled, fluxBrakeOnsetDeltaMv, fluxBrakeRecipRangeMv,
-										fluxBrakeMaxFraction, torqueCurrentFraction, overshoot);
+										fluxBrakeMaxFraction, fluxBrakeSnapMv, torqueCurrentFraction, overshoot);
 	if (fluxBrakeEnabled && overshoot > fluxBrakeOnsetDeltaMv)
 	{
 		if (overshoot > fluxBrakeMaxOvershootMv) { fluxBrakeMaxOvershootMv = overshoot; }
@@ -1466,6 +1466,7 @@ void ClosedLoop::PublishFeatureConfig() noexcept
 	motorState.fluxBrakeOnsetDeltaMv = fluxBrakeOnsetDeltaMv;
 	motorState.fluxBrakeRecipRangeMv = fluxBrakeRecipRangeMv;
 	motorState.fluxBrakeMaxFraction = fluxBrakeMaxFraction;
+	motorState.fluxBrakeSnapMv = fluxBrakeSnapMv;
 #  endif
 }
 # endif
@@ -1481,6 +1482,10 @@ void ClosedLoop::PublishFeatureConfig() noexcept
 //   133 (0x85) phase advance onset speed, full steps/sec
 //   134 (0x86) phase advance slope, thousandths of a phase count per full step/sec
 //   135 (0x87) phase advance maximum, phase counts (1/4096 electrical rev, limit 1024 = 90deg)
+//   136 (0x88) flux braking supply-step ('snap') threshold, mV: a single-sample rise bigger than
+//              this is treated as the supply stepping up rather than regeneration and is not
+//              braked. Hard regeneration can rise faster than 8V between ADC refreshes; on a known
+//              supply, set this just below the supply voltage so only power-appearance skips.
 // Settings changed here are not persisted; set them from config.g if they should survive a reboot.
 GCodeResult ClosedLoop::ProcessFeatureRegister(bool isSet, uint8_t regNum, uint32_t regVal, const StringRef& reply) noexcept
 {
@@ -1527,6 +1532,22 @@ GCodeResult ClosedLoop::ProcessFeatureRegister(bool isSet, uint8_t regNum, uint3
 		else
 		{
 			reply.printf("flux braking maximum %u%%", (unsigned int)lrintf(fluxBrakeMaxFraction * 100.0f));
+		}
+		break;
+
+	case 0x88:
+		if (isSet)
+		{
+			if (regVal < 1000 || regVal > 60000)
+			{
+				reply.copy("snap threshold must be 1000-60000 mV");
+				return GCodeResult::error;
+			}
+			fluxBrakeSnapMv = (uint16_t)regVal;
+		}
+		else
+		{
+			reply.printf("flux braking supply-step threshold %umV", fluxBrakeSnapMv);
 		}
 		break;
 # endif

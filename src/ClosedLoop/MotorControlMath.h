@@ -131,7 +131,11 @@ namespace MotorControlMath
 #endif
 
 #if SUPPORT_FLUX_BRAKING
-	constexpr uint16_t FluxBrakeSnapMv = 8000;					// a single-sample jump bigger than this is the supply appearing, not regeneration
+	constexpr uint16_t FluxBrakeSnapDefaultMv = 8000;			// default single-sample jump treated as the supply stepping up rather than regeneration.
+																// Power-on itself does not rely on this: readings below the caller's plausibility floor never
+																// touch the baseline, and the first plausible reading pulls the baseline DOWN from its init.
+																// Hard regeneration can exceed 8V between ADC refreshes and would then be misclassified and
+																// skipped, so the threshold is runtime-adjustable (M569.2 feature register 136).
 	constexpr uint16_t FluxBrakeBaselineDriftMv = 10;			// upward drift step, applied every 64 control cycles (about 2V/s at the 12.5kHz loop rate)
 
 	// Maintain the supply-voltage baseline and return the d-axis current fraction to inject. Call at
@@ -146,7 +150,7 @@ namespace MotorControlMath
 	// overshoot above the baseline (diagnostics), whether or not braking is enabled.
 	static inline float ComputeFluxBrakeFraction(uint16_t vsMv, uint16_t& baselineMv, uint32_t& baselineDivider,
 										bool enabled, uint16_t onsetDeltaMv, float recipRangeMv, float maxFraction,
-										float torqueCurrentFraction, uint16_t& overshootOut) noexcept
+										uint16_t snapMv, float torqueCurrentFraction, uint16_t& overshootOut) noexcept
 	{
 		overshootOut = 0;
 		if (vsMv <= baselineMv)
@@ -154,9 +158,9 @@ namespace MotorControlMath
 			baselineMv = vsMv;										// follow a falling supply immediately
 			return 0.0;
 		}
-		if (vsMv - baselineMv >= FluxBrakeSnapMv)
+		if (vsMv - baselineMv >= snapMv)
 		{
-			baselineMv = vsMv;										// supply switched on, not regeneration
+			baselineMv = vsMv;										// supply stepped up, not regeneration
 			return 0.0;
 		}
 		if (((++baselineDivider) & 0x3F) == 0 && baselineMv < vsMv)
