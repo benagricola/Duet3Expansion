@@ -104,6 +104,9 @@ constexpr uint32_t DirectModeSpiSleepClocks = (StepClockRate * DirectModeSpiSlee
 #endif
 
 static volatile uint32_t DriversDirectSleepClocks = DefaultSpiSleepClocks;	// how long the direct-mode/phase-step cycle sleeps. volatile: written on core 0 (SetDriverMode), read on core 1 (pacing)
+#if SUPPORT_CLOSED_LOOP
+static volatile uint32_t directLoopPeriodOverrideClocks = 0;				// bench: runtime override of the direct-mode cycle time; 0 = use DirectModeSpiSleepClocks
+#endif
 															// there is 1 write + 1 read/write per motor current setting.
 #else
 constexpr uint32_t DriversSpiClockFrequency = 2000000;		// 2MHz SPI clock
@@ -2043,6 +2046,26 @@ uint16_t SmartDrivers::GetSupplyVoltageAdcReading(size_t driver) noexcept
 }
 # endif
 
+# if SUPPORT_CLOSED_LOOP
+// Bench: override the direct-mode control cycle time at runtime (0 restores the board default).
+// If the cycle work exceeds the period the hybrid overrun handling keeps the loop free-running.
+void SmartDrivers::SetDirectLoopPeriodMicroseconds(uint32_t us) noexcept
+{
+	directLoopPeriodOverrideClocks = (us == 0) ? 0 : (StepClockRate * us)/1000000;
+	if (DriversDirectSleepClocks != DefaultSpiSleepClocks && DriversDirectSleepClocks != PhaseStepSpiSleepClocks)
+	{
+		// The direct-mode rate is active now; apply immediately
+		DriversDirectSleepClocks = (directLoopPeriodOverrideClocks != 0) ? directLoopPeriodOverrideClocks : DirectModeSpiSleepClocks;
+	}
+}
+
+uint32_t SmartDrivers::GetDirectLoopPeriodMicroseconds() noexcept
+{
+	const uint32_t clocks = (directLoopPeriodOverrideClocks != 0) ? directLoopPeriodOverrideClocks : DirectModeSpiSleepClocks;
+	return (clocks * 1000000)/StepClockRate;
+}
+# endif
+
 # if MNB_USB_DIAG
 // Bench diagnostic: report the XDIRECT staging state so the coil-current path can be traced end to end
 void SmartDrivers::GetBenchXdirectDiag(uint32_t& frames, uint32_t& phaseToSet, uint32_t& gconfShadow) noexcept
@@ -2075,7 +2098,8 @@ bool SmartDrivers::SetDriverMode(size_t driver, unsigned int mode) noexcept
 		// at the slow housekeeping rate. The main-board driver only switched the rate for phase stepping,
 		// so closed loop was left at the 500us default - far too slow and unstable.
 		const bool directMode = (mode == (unsigned int)DriverMode::direct || mode == (unsigned int)DriverMode::direct + 1);
-		DriversDirectSleepClocks = (directMode) ? DirectModeSpiSleepClocks : DefaultSpiSleepClocks;
+		DriversDirectSleepClocks = (directMode) ? ((directLoopPeriodOverrideClocks != 0) ? directLoopPeriodOverrideClocks : DirectModeSpiSleepClocks)
+								: DefaultSpiSleepClocks;
 # if !TMC_ON_CORE1
 		// Run the task above the CAN receive task only while the high-rate direct-mode cycle is active
 		tmcTask.SetPriority((directMode) ? TaskPriority::TmcClosedLoop : TaskPriority::TmcOpenLoop);

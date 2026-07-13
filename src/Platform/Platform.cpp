@@ -1165,7 +1165,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v52 snap register\n");
+			debugPrintf("Bench: v53 loop period register\n");
 # endif
 			String<700> reply;
 			Tasks::Diagnostics(reply.GetRef());

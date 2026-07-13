@@ -1486,6 +1486,8 @@ void ClosedLoop::PublishFeatureConfig() noexcept
 //              this is treated as the supply stepping up rather than regeneration and is not
 //              braked. Hard regeneration can rise faster than 8V between ADC refreshes; on a known
 //              supply, set this just below the supply voltage so only power-appearance skips.
+//   137 (0x89) direct-mode control loop period, microseconds (40-1000; 0 = board default). If the
+//              cycle work exceeds the period the loop free-runs at its natural rate.
 // Settings changed here are not persisted; set them from config.g if they should survive a reboot.
 GCodeResult ClosedLoop::ProcessFeatureRegister(bool isSet, uint8_t regNum, uint32_t regVal, const StringRef& reply) noexcept
 {
@@ -1584,6 +1586,22 @@ GCodeResult ClosedLoop::ProcessFeatureRegister(bool isSet, uint8_t regNum, uint3
 		}
 		break;
 # endif
+
+	case 0x89:
+		if (isSet)
+		{
+			if (regVal != 0 && (regVal < 40 || regVal > 1000))
+			{
+				reply.copy("loop period must be 40-1000 microseconds, or 0 for the default");
+				return GCodeResult::error;
+			}
+			SmartDrivers::SetDirectLoopPeriodMicroseconds(regVal);
+		}
+		else
+		{
+			reply.printf("direct-mode loop period %" PRIu32 "us", SmartDrivers::GetDirectLoopPeriodMicroseconds());
+		}
+		break;
 
 	default:
 		reply.printf("unknown feature register %u", regNum);

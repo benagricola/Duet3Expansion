@@ -47,6 +47,10 @@ namespace SmartDrivers
 #if SUPPORT_FLUX_BRAKING
 	uint16_t GetSupplyVoltageAdcReading(size_t driver) noexcept;	// raw TMC2240 ADC_VSUPPLY reading, 9.732mV per count
 #endif
+#if SUPPORT_CLOSED_LOOP
+	void SetDirectLoopPeriodMicroseconds(uint32_t us) noexcept;		// bench: runtime override of the direct-mode control cycle time; 0 = board default
+	uint32_t GetDirectLoopPeriodMicroseconds() noexcept;
+#endif
 # if MNB_USB_DIAG
 	void GetBenchXdirectDiag(uint32_t& frames, uint32_t& phaseToSet, uint32_t& gconfShadow) noexcept;	// bench diagnostic for the coil-current path
 # endif
