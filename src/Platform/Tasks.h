@@ -26,6 +26,7 @@ namespace Tasks
 #endif
 		) noexcept;
 	void Diagnostics(const StringRef& reply) noexcept;
+	void AppendOwnedMutexes(const StringRef& reply) noexcept;	// list each held mutex and its holder (reported separately from Diagnostics: the M122 part carrying the task list is close to the main board's receive limit)
 	uint32_t DoDivide(uint32_t a, uint32_t b) noexcept;
 	void *DoMemoryLeak() noexcept;
 	uint32_t DoMemoryRead(const uint32_t* addr) noexcept;

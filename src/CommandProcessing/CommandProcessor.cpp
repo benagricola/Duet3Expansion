@@ -483,6 +483,7 @@ static GCodeResult GetInfo(const CanMessageReturnInfo& msg, const StringRef& rep
 #endif
 			reply.lcatf("Bootloader ID: %s", (bootloaderVersionText == nullptr) ? "not available" : bootloaderVersionText);
 			Platform::AppendDiagnostics(reply);
+			Tasks::AppendOwnedMutexes(reply);					// in this part rather than with the task list: that part is close to the main board's receive limit
 		}
 		break;
 
@@ -631,7 +632,11 @@ void CommandProcessor::Spin()
 		{
 			Platform::OnProcessingCanMessage();
 		}
-		String<StringLength500> reply;
+		// Static rather than stack: MAIN is the only caller, its stack is historically tight, and
+		// the diagnostics parts (task list + owned mutexes + park state) no longer fit in a small
+		// buffer without truncating mid-line
+		static String<1024> reply;
+		reply.Clear();
 		const StringRef& replyRef = reply.GetRef();
 		const CanMessageType id = buf->id.MsgType();
 		GCodeResult rslt;

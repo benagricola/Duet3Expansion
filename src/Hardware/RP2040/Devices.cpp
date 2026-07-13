@@ -49,13 +49,23 @@ extern "C" bool DRV_SPI_Initialize()
 	debugPrintf("SPI init start\n");
 	spiCanHardware = new SharedSpiClient(Platform::GetSharedSpi(spiCan_SpiChannel), 15000000, SpiMode::mode0, NoPin, false);
 	IoPort::SetPinMode(SPICanCsPin, OUTPUT_HIGH);
-	// Configure the bus without taking its mutex: the bus is dedicated to the CAN chip and all
-	// transactions are already serialised by the CAN driver's own mutex. Holding the bus mutex
-	// forever (the old Select(1000) here) is not harmless: FreeRTOS only restores a task's base
-	// priority when it holds NO mutexes, so any transient priority boost inherited by the task
-	// that ran this init latched permanently and starved its base-priority peers - seen on the
-	// bench as the encoder calibration task never completing (M569.6 hanging the main board).
+#if SPICAN_CORE0_SERVICE
+	// Configure the bus without taking its mutex. In core-0 service mode this init runs in a
+	// FreeRTOS task (MAIN), and holding the bus mutex forever is not harmless: FreeRTOS only
+	// restores a task's base priority when it holds NO mutexes, so any transient priority boost
+	// MAIN inherited latched permanently and starved its base-priority peers - seen on the bench
+	// as the encoder calibration task never completing (M569.6 hanging the main board).
+	// This mode therefore requires the CAN chip to have the SPI bus to itself (true on every
+	// current USE_SPICAN board): transactions are serialised by the CAN driver's own mutex, and
+	// nothing else may configure or use the bus. If a future board shares the bus, take the bus
+	// mutex around each transfer in DRV_SPI_TransferData instead.
 	spiCanHardware->SelectNoMutex();
+#else
+	// Core-1 service (the stock arrangement): reserve the bus permanently. Core 1 performs the
+	// transfers outside FreeRTOS and cannot take the mutex per transfer, so the init-time Select
+	// is what keeps core-0 bus clients off the bus for good.
+	spiCanHardware->Select(1000);
+#endif
 	debugPrintf("SPI init complete\n");
     return true;
 }

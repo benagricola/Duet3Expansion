@@ -932,27 +932,11 @@ extern "C" uint64_t TaskResetRunTimeCounter() noexcept
 	return ret;
 }
 
-void Tasks::Diagnostics(const StringRef& reply) noexcept
+// List each held mutex and its holder. A task holding a mutex wanted by a higher-priority task
+// runs at the inherited priority (shown as cur^base in the task list) until it releases its LAST
+// mutex, so a mutex held forever latches the boost - this report is what identifies the culprit.
+void Tasks::AppendOwnedMutexes(const StringRef& reply) noexcept
 {
-	// Append a memory report to a string
-	reply.lcatf("Never used RAM %d, free system stack %d words", GetNeverUsedRam(), GetHandlerFreeStack()/4);
-#if RPXXXX && SPICAN_CORE0_SERVICE
-	reply.lcatf("Core 1: %s, heartbeat %" PRIu32 ", resetAttempts %" PRIu32 ", launch progress %" PRIu32 ", retries %" PRIu32 "%s",
-				(!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running",
-				Core1Runtime::GetHeartbeat(), Core1Runtime::GetResetAttempts(),
-				Core1Runtime::GetLaunchProgress(), Core1Runtime::GetLaunchRetries(),
-				Core1Runtime::LaunchFailed() ? " LAUNCH-FAILED" : "");
-	{
-		int parkDepth;
-		bool parkRequested, isParked;
-		uint32_t parkAcquisitions, parkTimeouts;
-		Core1Runtime::GetParkDiagnostics(parkDepth, parkRequested, isParked, parkAcquisitions, parkTimeouts);
-		reply.catf(", park %d/%u/%u/%" PRIu32 "/%" PRIu32,		// depth/requested/parked/acquisitions/timeouts
-					parkDepth, (unsigned int)parkRequested, (unsigned int)isParked, parkAcquisitions, parkTimeouts);
-	}
-#endif
-	// Report the owned mutexes BEFORE the task list: when the reply buffer is tight this is the
-	// line that explains a task shown running above its base priority (mutex priority inheritance)
 	reply.lcat("Owned mutexes:");
 	for (const Mutex *m = Mutex::GetMutexList(); m != nullptr; m = m->GetNext())
 	{
@@ -962,7 +946,29 @@ void Tasks::Diagnostics(const StringRef& reply) noexcept
 			reply.catf(" %s(%s)", m->GetName(), pcTaskGetName(holder->GetFreeRTOSHandle()));
 		}
 	}
+}
 
+void Tasks::Diagnostics(const StringRef& reply) noexcept
+{
+	// Append a memory report to a string
+	reply.lcatf("Never used RAM %d, free system stack %d words", GetNeverUsedRam(), GetHandlerFreeStack()/4);
+#if RPXXXX && SPICAN_CORE0_SERVICE
+	// launch a/p/r = reset attempts/progress code/watchdog retries; park d/r/p/a/t = depth/requested/parked/acquisitions/timeouts.
+	// This line shares an M122 part with the task list, which is close to the main board's receive limit - keep it short.
+	reply.lcatf("Core 1: %s, heartbeat %" PRIu32 ", launch %" PRIu32 "/%" PRIu32 "/%" PRIu32 "%s",
+				(!Core1Runtime::IsStarted()) ? "not started" : (Core1Runtime::IsParked()) ? "parked" : "running",
+				Core1Runtime::GetHeartbeat(), Core1Runtime::GetResetAttempts(),
+				Core1Runtime::GetLaunchProgress(), Core1Runtime::GetLaunchRetries(),
+				Core1Runtime::LaunchFailed() ? " LAUNCH-FAILED" : "");
+	{
+		int parkDepth;
+		bool parkRequested, isParked;
+		uint32_t parkAcquisitions, parkTimeouts;
+		Core1Runtime::GetParkDiagnostics(parkDepth, parkRequested, isParked, parkAcquisitions, parkTimeouts);
+		reply.catf(", park %d/%u/%u/%" PRIu32 "/%" PRIu32,
+					parkDepth, (unsigned int)parkRequested, (unsigned int)isParked, parkAcquisitions, parkTimeouts);
+	}
+#endif
 	reply.lcat("Tasks:");
 
 	// Now the per-task memory report
