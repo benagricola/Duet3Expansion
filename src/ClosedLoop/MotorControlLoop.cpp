@@ -28,6 +28,7 @@
 #include "Encoders/Encoder.h"
 #include "SampleBuffer.h"
 #include "TuningMoves.h"
+#include "ControlLaw.h"
 
 // Narrow shim into the TMC driver HAL. Declared here rather than by including the driver header
 // (which drags in the whole platform); the C++ mangled name makes a signature mismatch a link error.
@@ -41,7 +42,6 @@ MotorControlBlock motorBlock;
 namespace MotorControl
 {
 	// These mirror the constants private to ClosedLoop
-	constexpr float PIDIlimit = 80.0;
 	constexpr unsigned int DerivativeFilterSize = 8;
 	constexpr unsigned int SpeedFilterSize = 8;
 	constexpr size_t driverNumber = 0;								// single closed-loop driver per board
@@ -407,74 +407,37 @@ namespace MotorControl
 		}
 		else
 		{
-			// Closed loop / assisted open loop, ported verbatim from ClosedLoop::ControlMotorCurrents.
-			// The control signal is chosen to be in the range -256..256 (arbitrary, as in the original).
-			const float PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
-			const float PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);
-			float PIDControlSignal, PIDVTerm, PIDATerm;
+			// Closed loop / assisted open loop - the control mathematics live in ControlLaw.h,
+			// shared verbatim with ClosedLoop::ControlMotorCurrents. The last* statics bound here
+			// feed the M569.5 sample stream.
 			uint16_t commandedStepPhase;
 			if (mode == MotorMode::closedLoop)
 			{
-				const float timeDelta = (float)timeElapsed * (1.0/(float)StepTimer::StepClockRate);
-				PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);
-				PIDVTerm = mParams.speed * Kv * timeElapsed;
-				PIDATerm = mParams.acceleration * Ka * fsquare((float)timeElapsed);
-				PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);
-
-				// Phase of the motor current is always +/- 1 full step relative to the measured position,
-				// with a speed-dependent feedforward, and the current magnitude follows the PID result.
-				const float PhaseFeedForwardFactor = 1000.0;
-				const int16_t phaseFeedForward = (int16_t)lrintf(constrain<float>(speedFilter.GetDerivative() * timeElapsed * PhaseFeedForwardFactor, -256.0, 256.0));
-				const uint16_t adjustedStepPhase = (uint16_t)((int16_t)measuredStepPhase + phaseFeedForward) % 4096u;
-				commandedStepPhase = (((PIDControlSignal < 0.0) ? (3 * 1024) : 1024) + adjustedStepPhase) % 4096u;
-				currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
+				MotorControlLaw::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
+									currentPositionError, errorDerivativeFilter.GetDerivative(), speedFilter.GetDerivative(),
+									mParams.speed, mParams.acceleration, timeElapsed, measuredStepPhase,
+									lastPIDPTerm, PIDITerm, lastPIDDTerm, lastPIDVTerm, lastPIDATerm, lastPIDControlSignal,
+									commandedStepPhase, currentFraction);
 			}
 			else
 			{
-				// Assisted open loop: the phase follows the commanded position; the I term is not used
-				// and the A and V terms are independent of the loop time. The error only boosts the
-				// current above the standstill floor.
-				constexpr float scalingFactor = 100.0;
-				PIDVTerm = mParams.speed * Kv * scalingFactor;
-				PIDATerm = mParams.acceleration * Ka * fsquare(scalingFactor);
-				PIDControlSignal = min<float>(fabsf(PIDPTerm + PIDDTerm) + fabsf(PIDVTerm) + fabsf(PIDATerm), 256.0);
-
-				const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0);	// llrintf so the float operand is always convertible; only the low 12 bits matter
-				commandedStepPhase = (stepPhase + motorBlock.phaseOffset) % 4096u;
-				currentFraction = holdCurrentFraction + (1.0 - holdCurrentFraction) * min<float>(PIDControlSignal * (1.0/256.0), 1.0);
+				MotorControlLaw::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
+									currentPositionError, errorDerivativeFilter.GetDerivative(),
+									mParams.speed, mParams.acceleration,
+									mParams.position, motorBlock.phaseOffset, holdCurrentFraction,
+									lastPIDPTerm, lastPIDDTerm, lastPIDVTerm, lastPIDATerm, lastPIDControlSignal,
+									commandedStepPhase, currentFraction);
 			}
 			SetMotorPhase(commandedStepPhase, currentFraction);
 
-			// Keep the control values for diagnostic sampling
-			lastPIDControlSignal = PIDControlSignal;
-			lastPIDPTerm = PIDPTerm;
-			lastPIDDTerm = PIDDTerm;
-			lastPIDVTerm = PIDVTerm;
-			lastPIDATerm = PIDATerm;
-
-			// Stall / pre-stall detection, ported from InstanceControlLoop
-			const float positionErr = fabsf(currentPositionError);
-			if (motorBlock.stall)
+			// Stall / pre-stall detection - shared hysteresis; the fault event is deferred to core 0
+			bool stall = motorBlock.stall, preStall = motorBlock.preStall;
+			if (MotorControlLaw::UpdateStallDetection(fabsf(currentPositionError), preErrorThreshold, errorThreshold, stall, preStall))
 			{
-				// Reset the stall flag when the position error falls below half the tolerance, to avoid generating too many stall events
-				if (errorThreshold <= 0 || positionErr < errorThreshold/2)
-				{
-					motorBlock.stall = false;
-				}
+				motorBlock.faultPending = true;						// core 0 turns this into the driver-fault event (it needs FreeRTOS)
 			}
-			else
-			{
-				const bool nowStalled = errorThreshold > 0 && positionErr > errorThreshold;
-				if (nowStalled)
-				{
-					motorBlock.stall = true;
-					motorBlock.faultPending = true;					// core 0 turns this into the driver-fault event (it needs FreeRTOS)
-				}
-				else
-				{
-					motorBlock.preStall = preErrorThreshold > 0 && positionErr > preErrorThreshold;
-				}
-			}
+			motorBlock.stall = stall;
+			motorBlock.preStall = preStall;
 		}
 		motorBlock.currentFraction = currentFraction;
 

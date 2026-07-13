@@ -42,6 +42,7 @@ using std::numeric_limits;
 # include "Encoders/LinearCompositeEncoder.h"
 
 # include <ClosedLoop/DerivativeAveragingFilter.h>
+# include <ClosedLoop/ControlLaw.h>
 
 # include <math.h>
 # include <Platform/Platform.h>
@@ -1100,32 +1101,14 @@ void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks time
 				}
 				else
 				{
-					// Look for a stall or pre-stall
-					const float positionErr = fabsf(currentPositionError);
-					if (stall)
+					// Look for a stall or pre-stall (shared hysteresis, ControlLaw.h)
+					if (MotorControlLaw::UpdateStallDetection(fabsf(currentPositionError), errorThresholds[0], errorThresholds[1], stall, preStall))
 					{
-						// Reset the stall flag when the position error falls to below half the tolerance, to avoid generating too many stall events
-						//TODO do we need a minimum delay before resetting too?
-						if (errorThresholds[1] <= 0 || positionErr < errorThresholds[1]/2)
-						{
-							stall = false;
-						}
-					}
-					else
-					{
-						stall = errorThresholds[1] > 0 && positionErr > errorThresholds[1];
-						if (stall)
-						{
 #if TMC_ON_CORE1
-							deferredDriverFault = true;					// core 1 cannot call FreeRTOS; SmartDrivers::Spin forwards this
+						deferredDriverFault = true;						// core 1 cannot call FreeRTOS; SmartDrivers::Spin forwards this
 #else
-							Heat::NewDriverFault();
+						Heat::NewDriverFault();
 #endif
-						}
-						else
-						{
-							preStall = errorThresholds[0] > 0 && positionErr > errorThresholds[0];
-						}
 					}
 				}
 			}
@@ -1329,33 +1312,15 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 	}
 	else
 	{
-		// Use a PID controller to calculate the required 'torque' - the control signal
-		// We choose to use a PID control signal in the range -256 to +256. This is arbitrary.
-		PIDPTerm = constrain<float>(Kp * currentPositionError, -256.0, 256.0);
-		PIDDTerm = constrain<float>(Kd * errorDerivativeFilter.GetDerivative() * StepTimer::StepClockRate, -256.0, 256.0);	// constrain D so that we can graph it more sensibly after a sudden step input
-
+		// The control mathematics live in ControlLaw.h, shared verbatim with the core-1 motor kernel
 		if (currentMode == ClosedLoopMode::closed)
 		{
-			const float timeDelta = (float)ticksSinceLastCall * (1.0/(float)StepTimer::StepClockRate);						// get the time delta in seconds
-			PIDITerm = constrain<float>(PIDITerm + Ki * currentPositionError * timeDelta, -PIDIlimit, PIDIlimit);			// constrain I to prevent it running away
-			PIDVTerm = mParams.speed * Kv * ticksSinceLastCall;
-			PIDATerm = mParams.acceleration * Ka * fsquare(ticksSinceLastCall);
-			PIDControlSignal = constrain<float>(PIDPTerm + PIDITerm + PIDDTerm + PIDVTerm + PIDATerm, -256.0, 256.0);		// clamp the sum between +/- 256
-
-			// Calculate the offset required to produce the torque in the correct direction
-			// i.e. if we are moving in the positive direction, we must apply currents with a positive phase shift
-			// The max abs value of phase shift we want is 1 full step i.e. 25%.
-			// Given that PIDControlSignal is -256 .. 256 and phase is 0 .. 4095
-			// and that 25% of 4096 = 1024, our max phase shift = 4 * PIDControlSignal
-
-			// New algorithm: phase of motor current is always +/- 1 full step relative to current position, but motor current is adjusted according to the PID result
-			// The following assumes that signed arithmetic is 2's complement
-			const float PhaseFeedForwardFactor = 1000.0;
-			const int16_t phaseFeedForward = lrintf(constrain<float>(speedFilter.GetDerivative() * ticksSinceLastCall * PhaseFeedForwardFactor, -256.0, 256.0));
 			const uint32_t measuredStepPhase = encoder->GetCurrentPhasePosition();
-			const uint16_t adjustedStepPhase = (uint16_t)((int16_t)measuredStepPhase + phaseFeedForward) % 4096u;
-			commandedStepPhase = (((PIDControlSignal < 0.0) ? (3 * 1024) : 1024) + adjustedStepPhase) % 4096u;
-			currentFraction = fabsf(PIDControlSignal) * (1.0/256.0);
+			MotorControlLaw::ComputeClosedLoop(Kp, Ki, Kd, Kv, Ka,
+								currentPositionError, errorDerivativeFilter.GetDerivative(), speedFilter.GetDerivative(),
+								mParams.speed, mParams.acceleration, ticksSinceLastCall, measuredStepPhase,
+								PIDPTerm, PIDITerm, PIDDTerm, PIDVTerm, PIDATerm, PIDControlSignal,
+								commandedStepPhase, currentFraction);
 #if MNB_USB_DIAG
 			if (benchCapRemaining != 0 && benchCapRemaining != -1)
 			{
@@ -1384,15 +1349,12 @@ inline float ClosedLoop::ControlMotorCurrents(StepTimer::Ticks ticksSinceLastCal
 		else
 		{
 			// Driver is in assisted open loop mode
-			// In this mode the I term is not used and the A and V terms are independent of the loop time.
-			constexpr float scalingFactor = 100.0;
-			PIDVTerm = mParams.speed * Kv * scalingFactor;
-			PIDATerm = mParams.acceleration * Ka * fsquare(scalingFactor);
-			PIDControlSignal = min<float>(fabsf(PIDPTerm + PIDDTerm) + fabsf(PIDVTerm) + fabsf(PIDATerm), 256.0);
-
-			const uint16_t stepPhase = (uint16_t)llrintf(mParams.position * 1024.0);		// we use llrintf so that we can guarantee to convert the float operand to integer. We only care about the lowest 12 bits.
-			commandedStepPhase = (stepPhase + phaseOffset) % 4096u;
-			currentFraction = holdCurrentFraction + (1.0 - holdCurrentFraction) * min<float>(PIDControlSignal * (1.0/256.0), 1.0);
+			MotorControlLaw::ComputeAssistedOpen(Kp, Kd, Kv, Ka,
+								currentPositionError, errorDerivativeFilter.GetDerivative(),
+								mParams.speed, mParams.acceleration,
+								mParams.position, phaseOffset, holdCurrentFraction,
+								PIDPTerm, PIDDTerm, PIDVTerm, PIDATerm, PIDControlSignal,
+								commandedStepPhase, currentFraction);
 		}
 	}
 	SetMotorPhase(commandedStepPhase, currentFraction);

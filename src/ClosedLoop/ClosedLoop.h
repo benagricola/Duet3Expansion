@@ -122,8 +122,6 @@ private:
 	static constexpr float DefaultHoldCurrentFraction = 0.25;		// the minimum fraction of the requested current that we apply when holding position
 	static constexpr float DefaultTorquePerAmp = 1.0;				// the torque per amp of motor current
 
-	static constexpr float PIDIlimit = 80.0;
-
 	static constexpr size_t driverNumber = 0;						// the driver number of this instance, can be changed to a variable if we ever support more than one closed loop driver on a board
 
 	// Methods used only by closed loop and by the tuning module

@@ -1165,7 +1165,7 @@ void Platform::Spin()
 		{
 			debugPrintf("Version %s\n", VERSION);
 # if MNB_USB_DIAG
-			debugPrintf("Bench: v40 staging3 final\n");
+			debugPrintf("Bench: v41 shared control law\n");
 # endif
 			String<StringLength256> reply;
 			Tasks::Diagnostics(reply.GetRef());
