@@ -107,6 +107,9 @@ constexpr uint32_t DriversSpiClockFrequency = 4000000;		// 4MHz SPI clock (max w
 
 constexpr uint32_t DriversDirectSleepMicroseconds = 80;		// how long the closed loop task sleeps for in each cycle
 constexpr uint32_t DriversDirectSleepClocks = (StepTimer::StepClockRate * DriversDirectSleepMicroseconds)/1000000;
+
+static volatile uint32_t clCycleCount = 0;			// closed-loop/phase-step cycles completed since last read
+static volatile uint32_t clCycleOverruns = 0;		// of those, cycles that missed their wakeup deadline by at least half a period
 #else
 // With a 2MHz SPI clock, on the 3HC the TMC task takes about 25% of the CPU time. So we now use 500kHz. This means the SPI transfer will complete in a little over 240us.
 constexpr uint32_t DriversSpiClockFrequency = 500000;		// 500kHz SPI clock
@@ -337,6 +340,9 @@ constexpr uint8_t REGNUM_PWM_AUTO = 0x72;
 
 #if TMC_TYPE == 2240
 // ADC registers (TMC2240-specific)
+constexpr uint8_t REGNUM_ADC_VSUPPLY = 0x50;					// ADC_VSUPPLY_AIN register: supply voltage (and AIN) ADC readings
+constexpr uint32_t ADC_VSUPPLY_MASK = 0x1FFF;					// supply-voltage ADC reading is in bits 12:0
+constexpr float ADC_VSUPPLY_TO_VOLTS = 0.009732f;				// VS = ADC_VSUPPLY * 9.732mV (TMC2240 datasheet)
 constexpr uint8_t REGNUM_ADC_TEMP = 0x51;
 constexpr uint32_t ADC_TEMP_SHIFT = 0;
 constexpr uint32_t ADC_TEMP_MASK = 0x01FFF << ADC_TEMP_SHIFT;	// ADC temperature reading
@@ -484,6 +490,8 @@ public:
 	float CalculateCurrent() const noexcept;				// calculate what current the driver is actually using based on register values
 #if TMC_TYPE == 2240
 	float GetDriverTemperature() const noexcept;			// get driver temperature from ADC_TEMP register
+	float GetSupplyVoltage() const noexcept;				// get supply voltage from the ADC_VSUPPLY register
+	float GetPeakSupplyVoltage(bool clear) noexcept;		// get the peak supply voltage seen since the last call, optionally clearing it
 #endif
 
 	static void TransferTimedOut() noexcept { ++numTimeouts; }
@@ -529,7 +537,7 @@ private:
 	static const uint8_t WriteRegNumbers[NumWriteRegisters];	// the register numbers that we write to
 
 #if TMC_TYPE == 2240
-	static constexpr unsigned int NumReadRegisters = 6;		// the number of registers that we read from (includes ADC_TEMP)
+	static constexpr unsigned int NumReadRegisters = 7;		// the number of registers that we read from (includes ADC_TEMP and ADC_VSUPPLY)
 #else
 	static constexpr unsigned int NumReadRegisters = 5;		// the number of registers that we read from
 #endif
@@ -543,6 +551,7 @@ private:
 	static constexpr unsigned int ReadPwmAuto = 4;
 #if TMC_TYPE == 2240
 	static constexpr unsigned int ReadAdcTemp = 5;			// ADC_TEMP register for TMC2240
+	static constexpr unsigned int ReadAdcVsupply = 6;		// ADC_VSUPPLY register for TMC2240
 #endif
 	static constexpr unsigned int ReadSpecial = NumReadRegisters;
 
@@ -568,6 +577,9 @@ private:
 	uint16_t numReads, numWrites;							// how many successful reads and writes we had
 	uint16_t standstillCurrentFraction;						// divide this by 256 to get the motor current standstill fraction
 
+#if TMC_TYPE == 2240
+	volatile uint16_t maxVsupplyAdc = 0;					// peak ADC_VSUPPLY since last reported, for overvoltage monitoring
+#endif
 	static uint16_t numTimeouts;							// how many times a transfer timed out
 
 	uint8_t driverNumber;									// the axis number of this driver as used to index the DriveMovements in the DDA
@@ -609,7 +621,8 @@ const uint8_t TmcDriverState::ReadRegNumbers[NumReadRegisters] =
 	REGNUM_PWM_SCALE,
 	REGNUM_PWM_AUTO,
 #if TMC_TYPE == 2240
-	REGNUM_ADC_TEMP
+	REGNUM_ADC_TEMP,
+	REGNUM_ADC_VSUPPLY
 #endif
 };
 
@@ -964,7 +977,24 @@ float TmcDriverState::CalculateCurrent() const noexcept
 float TmcDriverState::GetDriverTemperature() const noexcept
 {
 	// TMC2240 datasheet: temperature = (ADC_TEMP - 2038) / 7.7
-	return (float)(((readRegisters[ReadAdcTemp] & ADC_TEMP_MASK) >> ADC_TEMP_SHIFT) - 2038) / 7.7f;
+	// Cast to signed before subtracting: the masked ADC value is unsigned, so when ADC_TEMP reads
+	// below 2038 (e.g. the chip is unpowered/unread and the register is 0) the subtraction would
+	// otherwise underflow and report a nonsense temperature.
+	const int32_t adcTemp = (int32_t)((readRegisters[ReadAdcTemp] & ADC_TEMP_MASK) >> ADC_TEMP_SHIFT);
+	return (float)(adcTemp - 2038) / 7.7f;
+}
+
+float TmcDriverState::GetSupplyVoltage() const noexcept
+{
+	// TMC2240 datasheet: VS = ADC_VSUPPLY * 9.732mV
+	return (float)(readRegisters[ReadAdcVsupply] & ADC_VSUPPLY_MASK) * ADC_VSUPPLY_TO_VOLTS;
+}
+
+float TmcDriverState::GetPeakSupplyVoltage(bool clear) noexcept
+{
+	const float v = (float)maxVsupplyAdc * ADC_VSUPPLY_TO_VOLTS;
+	if (clear) { maxVsupplyAdc = 0; }
+	return v;
 }
 #endif
 
@@ -1069,8 +1099,12 @@ void TmcDriverState::AppendDriverStatus(const StringRef& reply, bool clearGlobal
 	ResetLoadRegisters();
 
 	reply.catf(", mspos %u, reads %u, writes %u timeouts %u", (unsigned int)(readRegisters[ReadMsCnt] & 1023), numReads, numWrites, numTimeouts);
+#if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+	reply.catf(", cl cycles %" PRIu32 " (%" PRIu32 " late)", clCycleCount, clCycleOverruns);
+#endif
 #if TMC_TYPE == 2240
 	reply.catf(", temp %.1fC", (double)GetDriverTemperature());
+	reply.catf(", VS %.1fV peak %.1fV", (double)GetSupplyVoltage(), (double)GetPeakSupplyVoltage(true));
 #endif
 	numReads = numWrites = 0;
 	if (clearGlobalStats)
@@ -1226,6 +1260,13 @@ void TmcDriverState::TransferSucceeded(const uint8_t *rcvDataBlock) noexcept
 		else
 		{
 			readRegisters[previousRegIndexRequested] = regVal;
+#if TMC_TYPE == 2240
+			if (previousRegIndexRequested == ReadAdcVsupply)
+			{
+				const uint16_t v = (uint16_t)(regVal & ADC_VSUPPLY_MASK);
+				if (v > maxVsupplyAdc) { maxVsupplyAdc = v; }		// peak-hold the supply voltage to catch decel/regen transients
+			}
+#endif
 			if (previousRegIndexRequested == ReadSpecial)
 			{
 				specialReadRegisterNumber = 0xFE;
@@ -1284,13 +1325,20 @@ static uint32_t lastWakeupTime = 0;
 static StepTimer tmcTimer;
 static bool needToSetCoilCurrents = false;
 static bool setCoilCurrents = false;
+#if TMC_USES_SHARED_SPI
+static bool lastTransferHadXdirect = false;					// whether the last transfer sent an XDIRECT frame before the register frame
+static bool tmcRegRequestOutstanding = false;				// whether a register request has been sent whose response has not yet been captured
+static bool tmcHarvestReady = false;						// whether the last transfer's first frame captured the response to an outstanding request
+#endif
 #endif
 
 #if !TMC_USES_SHARED_SPI
 static volatile DmaCallbackReason dmaFinishedReason;
+#endif
 
 #if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
-
+// Stage a new XDIRECT (0x2D) coil-current value to be written on the next SPI cycle.
+// Used by both the DMA (SAME5x) and the shared-SPI (RP) transports.
 inline bool TmcDriverState::SetXdirect(uint32_t regVal) noexcept
 {
 	if (regVal != phaseToSet)
@@ -1301,9 +1349,9 @@ inline bool TmcDriverState::SetXdirect(uint32_t regVal) noexcept
 	}
 	return false;
 }
-
 #endif
 
+#if !TMC_USES_SHARED_SPI
 static void InitialiseDMA() noexcept
 {
 #if SAME70
@@ -1556,8 +1604,28 @@ void RxDmaCompleteCallback(CallbackParameter param, DmaCallbackReason reason) no
 			AtomicCriticalSectionLocker lock;
 			if (tmcTimer.ScheduleCallbackFromIsr(lastWakeupTime))
 			{
-				lastWakeupTime = StepTimer::GetTimerTicksWhenInterruptsDisabled();
-				tmcTask.GiveFromISR(NotifyIndices::Tmc);
+				// The deadline has already passed. If only slightly late (interrupt/preemption jitter), wake
+				// immediately and keep the deadline sequence so that jitter does not cost loop rate. If
+				// grossly late the loop is genuinely overrunning: skip forward and schedule one full period
+				// from now instead of running back-to-back, so that overload degrades the loop rate
+				// gracefully instead of making the task CPU-bound. A saturated TMC task starves every
+				// lower-priority task (in closed loop mode it runs above the CAN receive task), which ends
+				// in CAN buffer exhaustion and an unresponsive board.
+				const uint32_t lateness = StepTimer::GetTimerTicksWhenInterruptsDisabled() - lastWakeupTime;
+				if (lateness < DriversDirectSleepClocks/2)
+				{
+					tmcTask.GiveFromISR(NotifyIndices::Tmc);
+				}
+				else
+				{
+					++clCycleOverruns;
+					lastWakeupTime = StepTimer::GetTimerTicksWhenInterruptsDisabled() + DriversDirectSleepClocks;
+					if (tmcTimer.ScheduleCallbackFromIsr(lastWakeupTime))
+					{
+						lastWakeupTime = StepTimer::GetTimerTicksWhenInterruptsDisabled();	// should not happen; give up and wake now
+						tmcTask.GiveFromISR(NotifyIndices::Tmc);
+					}
+				}
 			}
 		}
 	}
@@ -1604,7 +1672,22 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 		{
 			// Handle the read response - data comes out of the drivers in reverse driver order
 #if SINGLE_DRIVER
+# if TMC_USES_SHARED_SPI && (SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP)
+			// Each TMC datagram returns the data requested by the previous datagram, so the response to a
+			// register request is captured by the first frame of the following transfer, and is available
+			// here one cycle after that transfer. If that transfer began with an XDIRECT coil-current frame
+			// the response is in the XDIRECT frame's receive buffer; without this distinction the readings
+			// (VS, temperature, DRV_STATUS etc.) intermittently read as zero whenever the coil currents are
+			// being updated. Register frames are also decimated while streaming coil currents, so a valid
+			// response is not present after every transfer.
+			if (tmcHarvestReady)
+			{
+				driverStates[0].TransferSucceeded(const_cast<const uint8_t*>((lastTransferHadXdirect) ? tmcAltRcvData : tmcRcvData));
+				tmcHarvestReady = false;
+			}
+# else
 			driverStates[0].TransferSucceeded(const_cast<const uint8_t*>(tmcRcvData));
+# endif
 			if (driversState == DriversState::initialising && !driverStates[0].UpdatePending())
 			{
 				fastDigitalWriteLow(GlobalTmcEnablePin);
@@ -1654,8 +1737,6 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 
 		// Set up data to write. Driver 0 is the first in the SPI chain so we must write them in reverse order.
 #if SINGLE_DRIVER
-		driverStates[0].GetSpiCommand(const_cast<uint8_t*>(tmcSendData));
-
 # if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
 		if (needToSetCoilCurrents)
 		{
@@ -1665,6 +1746,7 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 			setCoilCurrents = true;
 		}
 # endif
+		driverStates[0].GetSpiCommand(const_cast<uint8_t*>(tmcSendData));
 #else
 		volatile uint8_t *writeBufPtr = tmcSendData + 5 * numTmcDrivers;
 		for (size_t i = 0; i < numTmcDrivers; ++i)
@@ -1711,13 +1793,39 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 			fastDigitalWriteHigh(Tmc51xxCSPins[i]);			// set CS high
 		}
 # else
+#  if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+		lastTransferHadXdirect = setCoilCurrents;
+		if (setCoilCurrents)
+		{
+			// In direct mode, write the staged coil currents (XDIRECT) first. Its response (which carries the
+			// data requested by the previous register frame - see the harvesting code) goes to tmcAltRcvData.
+			// CS is toggled per transaction, which gives the chip the required CS-high gap.
+			setCoilCurrents = false;
+			fastDigitalWriteLow(GlobalTmcCSPin);
+			spiDevice->TransceivePacket(const_cast<uint8_t*>(tmcPhaseSendData), const_cast<uint8_t*>(tmcAltRcvData), sizeof(tmcPhaseSendData));
+			fastDigitalWriteHigh(GlobalTmcCSPin);
+		}
+#  endif
+#  if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+		// A register request goes out in every transfer; its response is captured by the following
+		// transfer's first frame and harvested one iteration later
+		tmcHarvestReady = tmcRegRequestOutstanding;
+		tmcRegRequestOutstanding = true;
+#  endif
 		fastDigitalWriteLow(GlobalTmcCSPin);			// set CS low
 		spiDevice->TransceivePacket(const_cast<uint8_t*>(tmcSendData), const_cast<uint8_t*>(tmcRcvData), sizeof(tmcSendData));
 		fastDigitalWriteHigh(GlobalTmcCSPin);			// set CS high
 # endif
 		spiDevice->Deselect();
 # if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
-		lastWakeupTime = StepTimer::GetTimerTicks();
+		++clCycleCount;
+		// Do not reset lastWakeupTime here: the wakeup deadline sequence must advance by a fixed period per
+		// cycle (absolute pacing) so that the loop rate is work-independent. Resetting to "now" makes the
+		// period work+sleep; on boards where the iteration work is significant (about 75us on the RP2350
+		// shared-SPI boards) that halves the loop rate, which changes the balance of the closed-loop V and A
+		// feedforward terms (scaled by ticksSinceLastCall) against the P term clamp and causes large
+		// transient position errors at direction reversals. The overrun handling below deals with
+		// iterations that miss their deadline.
 # else
 		delay(1);
 # endif
@@ -1772,6 +1880,49 @@ extern "C" [[noreturn]] void TmcLoop(void *) noexcept
 #endif
 		}
 #endif
+# if SUPPORT_PHASE_STEPPING || SUPPORT_CLOSED_LOOP
+#  if TMC_USES_SHARED_SPI
+		// Blocking shared-SPI transport (RP): the transfer above completed synchronously, so we pace the
+		// closed-loop / phase-stepping iterations here at a regular interval (DriversDirectSleepMicroseconds).
+		// On the DMA (SAME5x) transport this inter-cycle pacing is done in RxDmaCompleteCallback instead.
+		TaskBase::ClearCurrentTaskNotifyCount(NotifyIndices::Tmc);
+		{
+			bool runNow;
+			{
+				AtomicCriticalSectionLocker lock;
+				lastWakeupTime += DriversDirectSleepClocks;
+				runNow = tmcTimer.ScheduleCallbackFromIsr(lastWakeupTime);			// true if that wake time has already passed
+				if (runNow)
+				{
+					// The deadline has already passed. If we are only slightly late (interrupt/preemption
+					// jitter), run immediately and keep the deadline sequence, so that jitter does not cost
+					// loop rate. If we are grossly late the loop is genuinely overrunning: skip forward and
+					// schedule one full period from now instead of running back-to-back, so that overload
+					// degrades the loop rate gracefully instead of making the task CPU-bound. A saturated
+					// TMC task starves every lower-priority task (in closed loop mode it runs above the CAN
+					// receive task), which ends in CAN buffer exhaustion and an unresponsive board.
+					const uint32_t lateness = StepTimer::GetTimerTicksWhenInterruptsDisabled() - lastWakeupTime;
+					if (lateness >= DriversDirectSleepClocks/2)
+					{
+						++clCycleOverruns;
+						lastWakeupTime = StepTimer::GetTimerTicksWhenInterruptsDisabled() + DriversDirectSleepClocks;
+						runNow = tmcTimer.ScheduleCallbackFromIsr(lastWakeupTime);
+						if (runNow)
+						{
+							lastWakeupTime = StepTimer::GetTimerTicksWhenInterruptsDisabled();	// should not happen; give up and run now
+						}
+					}
+				}
+			}
+			if (!runNow)
+			{
+				(void)TaskBase::TakeIndexed(NotifyIndices::Tmc, TransferTimeout);	// wait for the timer callback
+			}
+		}
+#  endif
+# else
+		delay(1);
+# endif
 	}
 }
 
@@ -1935,6 +2086,33 @@ void SmartDrivers::Exit() noexcept
 #endif
 	tmcTask.TerminateAndUnlink();
 	driversState = DriversState::shutDown;						// prevent Spin() calls from doing anything
+}
+
+// Check periodically whether the closed-loop cycle is maintaining its intended rate, and raise a driver warning if not.
+// The V and A feedforward terms of the closed-loop controller scale with the cycle time, so a degraded rate changes the
+// controller balance and must not go unnoticed. Called regularly from the main loop; cheap when the check interval has not expired.
+void SmartDrivers::PollClosedLoopCycleRate() noexcept
+{
+	constexpr uint32_t CheckIntervalMillis = 5000;
+	static uint32_t lastCheckMillis = 0;
+	static bool wasDegraded = false;
+	const uint32_t now = millis();
+	if (now - lastCheckMillis >= CheckIntervalMillis)
+	{
+		const uint32_t elapsed = now - lastCheckMillis;
+		lastCheckMillis = now;
+		const uint32_t cycles = clCycleCount;
+		clCycleCount = 0;
+		clCycleOverruns = 0;
+		const uint32_t expectedCycles = (elapsed * 1000)/DriversDirectSleepMicroseconds;
+		const bool degraded = (cycles < (expectedCycles * 4)/5);				// degraded if below 80% of the design rate
+		if (degraded && !wasDegraded)
+		{
+			CanInterface::RaiseEventf(EventType::driver_warning, 0, 0, ", closed loop rate low (%" PRIu32 " of %" PRIu32 "Hz)",
+										(cycles * 1000)/elapsed, 1000000u/DriversDirectSleepMicroseconds);
+		}
+		wasDegraded = degraded;
+	}
 }
 
 void SmartDrivers::SetCurrent(size_t driver, float current) noexcept

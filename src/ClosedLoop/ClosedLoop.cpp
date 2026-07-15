@@ -106,6 +106,18 @@ void ClosedLoop::SetTargetToCurrentPosition() noexcept
 	moveInstance->SetCurrentMotorSteps(driverNumber, mParams.position);
 }
 
+// Adopt a (re)configured encoder, keeping 'encoder' and 'encoderState' in step so that EncoderState::ready always
+// means a live, initialised encoder. Frees any previous encoder, then takes ownership of 'newEncoder' (or nullptr
+// for "no usable encoder"). The state is written last, so the control loop - which only reads when the state is
+// 'ready' - never sees the new pointer before the state. Only ever call this while the control loop is stood down
+// (i.e. after the reconfiguration handshake has reached 'paused'), or before it starts.
+void ClosedLoop::SetEncoder(Encoder *newEncoder) noexcept
+{
+	DeleteObject(encoder);							// free any previous encoder (null-safe), leaving 'encoder' null
+	encoder = newEncoder;
+	encoderState = (newEncoder != nullptr) ? EncoderState::ready : EncoderState::none;
+}
+
 // Set the motor currents and update desiredStepPhase
 // The phase is normally in the range 0 to 4095 but when tuning it can be 0 to somewhat over 8192.
 // We must take it modulo 4096 when computing the currents. Function Trigonometry::FastSinCos does that.
@@ -125,9 +137,8 @@ void ClosedLoop::SetMotorPhase(uint16_t phase, float magnitude) noexcept
 # endif
 }
 
-#if SAME5x
+#if SAME5x	// only SAME5x boards generate an external TMC clock via a GCLK; on other boards (e.g. the TMC2240) the driver uses its internal oscillator
 static_assert(TmcClockGclkNumber == GclkNumApp1 || TmcClockGclkNumber == GclkNumApp2);	// check that this GCLK number has been reserved for application use
-#endif
 
 static void GenerateTmcClock()
 {
@@ -142,11 +153,14 @@ static void GenerateTmcClock()
 #endif
 	SmartDrivers::SetTmcExternalClock(15000000);
 }
+#endif
 
 // Module initialisation
 /*static*/ void ClosedLoop::Init() noexcept
 {
+#if SAME5x
 	GenerateTmcClock();															// generate the clock for the TMC2160A
+#endif
 }
 
 void ClosedLoop::InitInstance() noexcept
@@ -280,8 +294,33 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 
 	if (seenT)
 	{
-		// We set the mode to open loop earlier in this function so no need to do it here
-		DeleteObject(encoder);
+		// The phase step control loop reads the encoder every iteration from the TMC task whenever it is ready,
+		// regardless of mode, so we cannot safely delete and recreate the encoder object from here without
+		// coordinating. Ask the control loop to stop using the encoder and wait for it to acknowledge, so it
+		// cannot be inside the encoder object when we delete it below (or on the Init() error path).
+		constexpr unsigned int reconfigPauseTimeoutMs = 50;			// the control loop runs every ~80us, so this is ample
+		const EncoderState priorEncoderState = encoderState;
+		encoderState = EncoderState::changePending;
+		bool controlLoopPaused = false;
+		for (unsigned int i = 0; i < reconfigPauseTimeoutMs; ++i)
+		{
+			if (encoderState == EncoderState::paused)
+			{
+				controlLoopPaused = true;
+				break;
+			}
+			delay(1);
+		}
+		if (!controlLoopPaused)
+		{
+			encoderState = priorEncoderState;			// we changed nothing, so resume exactly as we were
+			reply.copy("encoder reads could not be paused for re-configuration");
+			return GCodeResult::error;
+		}
+
+		// The control loop has stood down. Free the old encoder now, before creating the new one, because they
+		// share the SPI bus; this also moves us to EncoderState::none. We set the mode to open loop earlier.
+		SetEncoder(nullptr);
 
 		// If the magnetic encoder type was provided, check that it is valid
 		MagneticEncoderType magEncoderType(MagneticEncoderType::as5047d);
@@ -293,56 +332,63 @@ GCodeResult ClosedLoop::ProcessM569Point1(CanMessageGenericParser& parser, const
 				if (!magEncoderType.IsValid())
 				{
 					reply.printf("unrecognised magnetic encoder type '%s'", magneticEncoderTypeString.c_str());
-					return GCodeResult::error;
+					return GCodeResult::error;			// no encoder was created, so we remain in EncoderState::none
 				}
 			}
 		}
 
+		Encoder *newEncoder = nullptr;
 		switch (tempEncoderType)
 		{
 		case EncoderType::none:
 		default:
-			// encoder is already nullptr
+			// no encoder
 			break;
 
 		case EncoderType::rotaryMagnetic:
-			encoder = CreateRotaryEncoder(magEncoderType, tempStepsPerRev, Platform::GetSharedSpi(Encoder_SpiChannel), EncoderCsPin);
+			newEncoder = CreateRotaryEncoder(magEncoderType, tempStepsPerRev, Platform::GetSharedSpi(Encoder_SpiChannel), EncoderCsPin);
 			CreateCalibrationTask();
 			break;
 
 #if SUPPORT_COMPOSITE_ENCODER
 		case EncoderType::linearComposite:
-			encoder = new LinearCompositeEncoder(tempCPR, tempStepsPerRev, Platform::GetSharedSpi(Encoder_SpiChannel), EncoderCsPin, magEncoderType);
+			newEncoder = new LinearCompositeEncoder(tempCPR, tempStepsPerRev, Platform::GetSharedSpi(Encoder_SpiChannel), EncoderCsPin, magEncoderType);
 			CreateCalibrationTask();
 			break;
 #endif
 
 #if SUPPORT_QUADRATURE_ENCODER
 		case EncoderType::rotaryQuadrature:
-			encoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
+			newEncoder = new QuadratureEncoderPdec((uint32_t)tempCPR, tempStepsPerRev);
 			break;
 #endif
 		}
 
-		if (encoder != nullptr)
+		GCodeResult rslt = GCodeResult::ok;
+		if (newEncoder != nullptr)
 		{
-			const GCodeResult rslt = encoder->Init(reply);
+			rslt = newEncoder->Init(reply);
 			if (rslt <= GCodeResult::warning)
 			{
-				tuningError = encoder->MinimalTuningNeeded();
-				encoder->LoadLUT(tuningError);
+				tuningError = newEncoder->MinimalTuningNeeded();
+				newEncoder->LoadLUT(tuningError);
 			}
 			else
 			{
-				DeleteObject(encoder);
+				delete newEncoder;						// initialisation failed, so discard it
+				newEncoder = nullptr;
 			}
-			return rslt;
 		}
 		else if (tempEncoderType != EncoderType::none)
 		{
 			reply.printf("unsupported encoder type %u", (unsigned int)tempEncoderType);
-			return GCodeResult::error;
+			return GCodeResult::error;					// no encoder was created, so we remain in EncoderState::none
 		}
+
+		// Publish the outcome to the control loop: 'ready' with the initialised encoder, or 'none' if no usable
+		// encoder was produced.
+		SetEncoder(newEncoder);
+		return rslt;
 	}
 
 	return GCodeResult::ok;
@@ -740,8 +786,18 @@ void ClosedLoop::AdjustTargetMotorSteps(float amount) noexcept
 
 void ClosedLoop::InstanceControlLoop(StepTimer::Ticks now, StepTimer::Ticks timeElapsed) noexcept
 {
-	// Read the current state of the drive. Do this even if we are not in closed loop mode.
-	if (encoder != nullptr && encoder->TakeReading())
+	// Encoder reconfiguration handshake: if M569.1 has asked us to stand down, acknowledge by moving to 'paused'
+	// (it will then delete/recreate the encoder).
+	const EncoderState es = encoderState;
+	if (es == EncoderState::changePending)
+	{
+		encoderState = EncoderState::paused;
+		return;
+	}
+
+	// Read the current state of the drive, but only when the encoder is 'ready' - that guarantees it is live and
+	// initialised, so it replaces the old 'encoder != nullptr' check. Do this even if we are not in closed loop mode.
+	if (es == EncoderState::ready && encoder->TakeReading())
 	{
 		// Calculate and store the current error in full steps
 		hasMovementCommand = moveInstance->GetCurrentMotion(driverNumber, now, mParams);

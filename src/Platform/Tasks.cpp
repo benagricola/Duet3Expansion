@@ -617,12 +617,29 @@ constexpr uint32_t FlashStart = XIP_BASE;
 {
 	// make sure that nothing runs from flash memory
 	IrqDisable();
-	// Reboot in 10 seconds no matter what happens (The flash operation usually takes less than 2 seconds)!
-	watchdog_reboot(0, 0, 5000);
-	// Erase the flash pages
-	flash_range_erase(0, length);
-	// now write the flash data
-	flash_range_program(0, (uint8_t *)firmware, length);
+	// Reboot in 1 second if any single step below hangs; the slowest single operation is a sector
+	// erase at ~400ms datasheet worst case, so this still leaves 2.5x headroom
+	watchdog_reboot(0, 0, 1000);
+	// The watchdog load register counts down in microseconds (the RP2040 counts twice per microsecond - errata RP2040-E1).
+	// We must kick the watchdog by writing the register directly: the SDK watchdog_update() is not in RAM.
+#if PICO_RP2040
+	constexpr uint32_t wdogLoad = 1000 * 1000 * 2;
+#else
+	constexpr uint32_t wdogLoad = 1000 * 1000;
+#endif
+	// Erase one sector at a time, kicking the watchdog after each, so that the watchdog bounds each
+	// sector erase rather than the whole erase, which can legitimately exceed it.
+	for (uint32_t offset = 0; offset < length; offset += FlashSectorSize)
+	{
+		flash_range_erase(offset, FlashSectorSize);
+		watchdog_hw->load = wdogLoad;
+	}
+	// now write the flash data, kicking the watchdog between sectors as above
+	for (uint32_t offset = 0; offset < length; offset += FlashSectorSize)
+	{
+		flash_range_program(offset, ((const uint8_t *)firmware) + offset, FlashSectorSize);
+		watchdog_hw->load = wdogLoad;
+	}
 	// Spin waiting for reboot
 	for(;;)
 	{
@@ -725,6 +742,10 @@ debugPrintf("Verify 1 complete, writing to flash, wait for reboot in 10 seconds\
 delay(100);
 #endif
 	CanInterface::Shutdown();
+#if 0
+	debugPrintf("Writing firmware to flash...\n");
+#endif
+	delay(200);											// let the debug output flush before IRQs are disabled
 	WriteFirmwareToFlash(firmwareBuffer, roundedUpLength);
 #if 0
 debugPrintf("Flash write complete erase time %d flash time %d\n", (int)(eraseTime*StepTimer::StepClocksToMillis), (int)(flashTime*StepTimer::StepClocksToMillis));
